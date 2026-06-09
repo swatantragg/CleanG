@@ -4,21 +4,6 @@
 import React, { useState } from "react";
 import { Icon, Avatar, StatusPill, OwnerDot } from "../components/ui.jsx";
 
-const ADOPTABLE = {
-  b_pdl2_anya: [
-    { id: "ad1", kind: "same", title: "Arijit Singh = Arjit Singh", detail: "Marked Same · keep “Arijit Singh” · 31 records affected", score: 96 },
-    { id: "ad2", kind: "diff", title: "Pritam ≠ Pratham", detail: "Marked Different · kept both · 74% similarity", score: 74 },
-    { id: "ad3", kind: "fix",  title: "Fix: “Amitabh Bhattacharya”", detail: "Hand-corrected from “Amitabh Bhattacharaya”", score: null },
-  ],
-  b_manorama_dev: [
-    { id: "ad4", kind: "same", title: "Shankar Mahadevan = Shankar Mahadevn", detail: "Marked Same · keep “Shankar Mahadevan” · 12 records", score: 93 },
-    { id: "ad5", kind: "fix",  title: "Fix: “Mahalakshmi Iyer”", detail: "Hand-corrected from “Mahalaxmi Iyer”", score: null },
-  ],
-  b_svf_vishal: [
-    { id: "ad6", kind: "del", title: "Rec 1495 deleted", detail: "Dup ISRC · same album as Rec 1496", score: null },
-  ],
-};
-
 export function CrossBranchBrowser({ ctx }) {
   const others = ctx.branches.filter(function (b) { return b.owner !== ctx.currentUserId; });
   const [sel, setSel] = useState(ctx.params && ctx.params.branchId || others[0] && others[0].id);
@@ -26,7 +11,7 @@ export function CrossBranchBrowser({ ctx }) {
   if (!branch) return React.createElement("div", { className: "page" }, React.createElement("div", { className: "empty" }, "No other branches to browse."));
   const owner = ctx.user(branch.owner);
   const ds = ctx.dataset(branch.dataset);
-  const items = ADOPTABLE[branch.id] || [];
+  const items = branch.decisions || [];
   const myBranch = ctx.branches.find(function (b) { return b.owner === ctx.currentUserId; });
 
   return React.createElement("div", { className: "page wide fade" },

@@ -1,0 +1,48 @@
+# G-Cleanser full stack: Postgres + FastAPI backend + React/nginx frontend.
+#   docker compose up --build
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: gcleanser
+    ports:
+      # Host 5433 → container 5432 (host 5432 is taken by local Postgres).
+      # The backend still reaches it as db:5432 over the compose network.
+      - "5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d gcleanser"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  backend:
+    build: ./backend
+    env_file:
+      - ./backend/.env
+    environment:
+      # Override .env host/port so the API reaches the db container.
+      POSTGRES_HOST: db
+      POSTGRES_PORT: "5432"
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+    volumes:
+      # Mount the Google service-account key (read-only). The path inside the
+      # container matches GOOGLE_APPLICATION_CREDENTIALS=./secrets/...json
+      - ./backend/secrets:/app/secrets:ro
+
+  frontend:
+    build: ./frontend
+    depends_on:
+      - backend
+    ports:
+      - "5174:80"
+
+volumes:
+  pgdata:
