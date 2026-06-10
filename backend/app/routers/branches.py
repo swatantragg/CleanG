@@ -3,11 +3,13 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import defer
 
+from .. import settings
 from ..db import get_db
 from ..models import Branch, File, Preset, User
 from ..pipeline import get_pipeline
-from ..schemas import BranchCreate, BranchRead, BranchUpdate, FileRead
+from ..schemas import BranchCreate, BranchRead, BranchUpdate, CleanRequest, FileRead
 from ..security import CurrentUser
 from ..storage import get_storage
 
@@ -92,22 +94,47 @@ async def list_branch_files(branch_id: int, user: User = CurrentUser, db: AsyncS
     await _owned(db, branch_id, user)
     rows = (
         await db.execute(
-            select(File).where(File.branch_id == branch_id).order_by(File.kind, File.created_at)
+            select(File)
+            .where(File.branch_id == branch_id)
+            .options(defer(File.content), defer(File.content_bytes))  # never list blobs
+            .order_by(File.kind, File.created_at)
         )
     ).scalars().all()
     return rows
 
 
 @router.post("/{branch_id}/clean", response_model=FileRead, status_code=201)
-async def run_cleaning(branch_id: int, user: User = CurrentUser, db: AsyncSession = Depends(get_db)):
-    """Run the cleaning pipeline over the branch's source files → one cleaned file."""
+async def run_cleaning(
+    branch_id: int,
+    body: CleanRequest | None = None,
+    user: User = CurrentUser,
+    db: AsyncSession = Depends(get_db),
+):
+    """Run the cleaning pipeline over the branch's source files → one cleaned file.
+
+    The request carries a primary key plus either a preset id (output columns taken
+    from the preset's config) or an explicit custom column list.
+    """
     branch = await _owned(db, branch_id, user)
     if branch.status != "active":
         raise HTTPException(409, "Branch is not active.")
+
+    body = body or CleanRequest()
+    columns = list(body.columns or [])
+    if body.preset_id is not None:
+        preset = await db.get(Preset, body.preset_id)
+        if not preset or (preset.owner_id is not None and preset.owner_id != user.id):
+            raise HTTPException(400, "Preset not found.")
+        preset_cols = (preset.config or {}).get("columns") or []
+        columns = list(preset_cols) + columns
+
+    spec = {"primary_key": body.primary_key, "preset_id": body.preset_id, "columns": columns}
+    storage = get_storage() if settings.STORAGE_BACKEND == "drive" else None
     try:
-        cleaned = await get_pipeline().run(db, get_storage(), branch)
+        cleaned = await get_pipeline().run(db, storage, branch, spec)
     except ValueError as exc:
         raise HTTPException(400, str(exc))
     await db.commit()
-    await db.refresh(cleaned)
+    # Don't re-read the cleaned blob just to serialize metadata.
+    await db.refresh(cleaned, attribute_names=["created_at"])
     return cleaned

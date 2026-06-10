@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import load_only
 
 from .db import AsyncSessionLocal, is_configured
 from .models import Branch, File
@@ -26,7 +27,9 @@ async def purge_branch(db: AsyncSession, storage, branch: Branch) -> str:
     """Purge one branch. Returns the resulting status string."""
     files = (
         await db.execute(
-            select(File).where(File.branch_id == branch.id, File.status == "available")
+            select(File)
+            .where(File.branch_id == branch.id, File.status == "available")
+            .options(load_only(File.storage_key, File.status))  # bytes aren't needed to purge
         )
     ).scalars().all()
 
@@ -48,6 +51,7 @@ async def purge_branch(db: AsyncSession, storage, branch: Branch) -> str:
         f.purged_at = now
         f.storage_key = ""
         f.content = None
+        f.content_bytes = None
     branch.status = "deleted"
     branch.purged_at = now
     if branch.deleted_at is None:

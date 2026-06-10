@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import (
 )
 from sqlalchemy.orm import DeclarativeBase
 
-from .settings import database_url
+from .settings import asyncpg_connect_args, database_url
 
 
 class Base(DeclarativeBase):
@@ -24,7 +24,9 @@ class Base(DeclarativeBase):
 
 
 _url = database_url("asyncpg")
-engine: Optional[AsyncEngine] = create_async_engine(_url, pool_pre_ping=True) if _url else None
+engine: Optional[AsyncEngine] = (
+    create_async_engine(_url, pool_pre_ping=True, connect_args=asyncpg_connect_args()) if _url else None
+)
 AsyncSessionLocal: Optional[async_sessionmaker[AsyncSession]] = (
     async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession) if engine else None
 )

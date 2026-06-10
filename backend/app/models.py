@@ -16,6 +16,7 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     Index,
+    LargeBinary,
     Text,
     func,
     text,
@@ -115,6 +116,9 @@ class File(Base):
     # are stored in Drive (storage_key = Drive file id, content = NULL).
     storage_key: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("''"))
     content: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # Raw bytes for source uploads (and locally-stored cleaned output). Binary-safe,
+    # unlike the legacy TEXT `content` column which cannot hold NUL bytes (e.g. .xlsx).
+    content_bytes: Mapped[Optional[bytes]] = mapped_column(LargeBinary, nullable=True)
     original_filename: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     mime_type: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     size_bytes: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)

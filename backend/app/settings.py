@@ -1,6 +1,6 @@
 """Env-driven settings. No external deps — reads os.environ / .env if present."""
 import os
-from urllib.parse import quote_plus
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 
 def _load_dotenv() -> None:
@@ -30,30 +30,44 @@ API_PREFIX = "/api"
 PUBLIC_BASE_URL = _env("PUBLIC_BASE_URL", "http://localhost:8000").rstrip("/")
 
 # ---- Database (PostgreSQL, async driver) ----
-POSTGRES_USER = _env("POSTGRES_USER")
-POSTGRES_PASSWORD = _env("POSTGRES_PASSWORD")
-POSTGRES_HOST = _env("POSTGRES_HOST")
-POSTGRES_PORT = _env("POSTGRES_PORT", "5432") or "5432"
-POSTGRES_DB = _env("POSTGRES_DB")
+# Single source of truth: DATABASE_URL (e.g. a managed Postgres like Neon), so the
+# whole team works against the same data. There is no local POSTGRES_* fallback.
 _DATABASE_URL = _env("DATABASE_URL")
+
+# libpq-only query params that the asyncpg driver does not accept — stripped from
+# the URL. SSL intent is re-applied via asyncpg_connect_args() instead.
+_LIBPQ_ONLY_QS = {"sslmode", "channel_binding", "gssencmode"}
 
 
 def database_url(driver: str = "asyncpg") -> str | None:
-    """SQLAlchemy URL for the given driver, or None when DB is unconfigured.
+    """SQLAlchemy URL for the given driver, or None when DATABASE_URL is unset.
 
     `driver` is "asyncpg" for the app/Alembic async engine, "psycopg2" only if a
     sync engine is ever needed.
     """
-    if _DATABASE_URL:
-        # Normalize the driver on an explicit override.
-        url = _DATABASE_URL
-        if url.startswith("postgresql://"):
-            url = url.replace("postgresql://", f"postgresql+{driver}://", 1)
-        return url
-    if POSTGRES_USER and POSTGRES_HOST and POSTGRES_DB:
-        pw = quote_plus(POSTGRES_PASSWORD)
-        return f"postgresql+{driver}://{POSTGRES_USER}:{pw}@{POSTGRES_HOST}:{POSTGRES_PORT}/{POSTGRES_DB}"
-    return None
+    if not _DATABASE_URL:
+        return None
+    url = _DATABASE_URL
+    for prefix in ("postgresql://", "postgres://"):
+        if url.startswith(prefix):
+            url = url.replace(prefix, f"postgresql+{driver}://", 1)
+            break
+    parts = urlsplit(url)
+    qs = [(k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True) if k.lower() not in _LIBPQ_ONLY_QS]
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(qs), parts.fragment))
+
+
+def _ssl_required() -> bool:
+    if not _DATABASE_URL:
+        return False
+    qs = dict(parse_qsl(urlsplit(_DATABASE_URL).query))
+    # Neon and most managed Postgres default to requiring TLS.
+    return qs.get("sslmode", "require").lower() not in ("disable", "allow", "prefer")
+
+
+def asyncpg_connect_args() -> dict:
+    """Extra connect args for the asyncpg engine (TLS, since libpq params are stripped)."""
+    return {"ssl": True} if _ssl_required() else {}
 
 
 # ---- Auth (JWT + argon2) ----
@@ -65,6 +79,9 @@ ACCESS_TOKEN_TTL_MINUTES = int(_env("ACCESS_TOKEN_TTL_MINUTES", "720") or "720")
 # Only the CLEANED output is stored in object storage (Google Drive).
 # Source files are stored as text in Postgres.
 SIGNED_URL_TTL_SECONDS = int(_env("SIGNED_URL_TTL_SECONDS", "300") or "300")
+# "local" → cleaned output stays in Postgres (no external creds; dev default).
+# "drive" → cleaned output goes to Google Drive (needs the vars below).
+STORAGE_BACKEND = _env("STORAGE_BACKEND", "local").lower() or "local"
 GOOGLE_APPLICATION_CREDENTIALS = _env("GOOGLE_APPLICATION_CREDENTIALS")  # path to service-account JSON file
 GOOGLE_DRIVE_FOLDER_ID = _env("GOOGLE_DRIVE_FOLDER_ID")  # parent folder id for the cleaned files
 

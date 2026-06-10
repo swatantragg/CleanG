@@ -112,6 +112,14 @@ class BranchRead(BaseModel):
     purged_at: Optional[datetime]
 
 
+class CleanRequest(BaseModel):
+    """Cleaning spec chosen in the wizard: a primary key plus either a preset or a
+    custom set of output columns. All optional so a bare POST still runs (passthrough)."""
+    primary_key: Optional[str] = None
+    preset_id: Optional[int] = None
+    columns: Optional[list[str]] = None  # custom mode: output columns besides the primary key
+
+
 class BranchWithOwner(BranchRead):
     owner_name: Optional[str] = None
     cleaned_file_id: Optional[int] = None

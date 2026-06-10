@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import load_only
 
 from ..db import get_db
 from ..models import Branch, File, User
@@ -32,9 +33,9 @@ async def list_shared_branches(user: User = CurrentUser, db: AsyncSession = Depe
     branch_ids = [b.id for b, _ in rows]
     cleaned = (
         await db.execute(
-            select(File).where(
-                File.branch_id.in_(branch_ids), File.kind == "cleaned", File.status == "available"
-            )
+            select(File)
+            .where(File.branch_id.in_(branch_ids), File.kind == "cleaned", File.status == "available")
+            .options(load_only(File.branch_id, File.original_filename, File.size_bytes))
         )
     ).scalars().all()
     by_branch = {f.branch_id: f for f in cleaned}

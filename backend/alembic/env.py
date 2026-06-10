@@ -6,7 +6,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.db import Base
 from app import models  # noqa: F401  ensure models are imported into metadata
-from app.settings import database_url
+from app.settings import asyncpg_connect_args, database_url
 
 config = context.config
 if config.config_file_name is not None:
@@ -39,7 +39,7 @@ def _do_run(connection) -> None:
 
 
 async def run_migrations_online() -> None:
-    engine = create_async_engine(DB_URL, pool_pre_ping=True)
+    engine = create_async_engine(DB_URL, pool_pre_ping=True, connect_args=asyncpg_connect_args())
     async with engine.connect() as connection:
         await connection.run_sync(_do_run)
     await engine.dispose()

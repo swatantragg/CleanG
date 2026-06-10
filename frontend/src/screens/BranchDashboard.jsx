@@ -15,8 +15,8 @@ export function BranchDashboard({ ctx }) {
   const shared = active.filter((b) => b.visibility === "shared");
 
   function openCreate() {
-    const sys = ctx.presets.find((p) => p.ownerId == null);
-    setModal({ name: "", presetId: sys ? sys.id : null, visibility: "shared", busy: false, err: null });
+    // Preset selection moves to a later phase — branches start with no preset.
+    setModal({ name: "", presetId: null, visibility: "shared", busy: false, err: null });
   }
   function submitCreate() {
     const name = (modal.name || "").trim();
@@ -65,15 +65,6 @@ export function BranchDashboard({ ctx }) {
             disabled={modal.busy} onChange={(e) => setModal((m) => ({ ...m, name: e.target.value, err: null }))}
             onKeyDown={(e) => { if (e.key === "Enter") submitCreate(); }} />
           {modal.err ? <div className="field-err">{modal.err}</div> : null}
-
-          <label className="field-label" style={{ marginTop: 14 }}>Cleaning preset</label>
-          <select className="tinput" value={modal.presetId ?? ""} disabled={modal.busy}
-            onChange={(e) => setModal((m) => ({ ...m, presetId: e.target.value ? Number(e.target.value) : null }))}>
-            <option value="">No preset</option>
-            {ctx.presets.map((p) => (
-              <option key={p.id} value={p.id}>{p.name}{p.ownerId == null ? " (system)" : ""}</option>
-            ))}
-          </select>
 
           <label className="field-label" style={{ marginTop: 14 }}>Visibility</label>
           <div className="row" style={{ gap: 10 }}>

@@ -50,7 +50,15 @@ export const api = {
     },
     remove: function (id) { return get(http.delete("/branches/" + id)); },
     files: function (id) { return get(http.get("/branches/" + id + "/files")); },
-    clean: function (id) { return get(http.post("/branches/" + id + "/clean")); },
+    clean: function (id, spec) {
+      const body = {};
+      if (spec) {
+        if (spec.primaryKey != null) body.primary_key = spec.primaryKey;
+        if (spec.presetId != null) body.preset_id = spec.presetId;
+        if (spec.columns != null) body.columns = spec.columns;
+      }
+      return get(http.post("/branches/" + id + "/clean", body));
+    },
     uploadSource: function (id, file) {
       const fd = new FormData();
       fd.append("file", file);
