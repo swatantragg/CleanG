@@ -4,14 +4,17 @@
 import React, { useState, useEffect, useRef } from "react";
 import { Icon } from "../components/ui.jsx";
 
+function n(v) { return v == null ? null : Number(v).toLocaleString(); }
+function rows(b) { return (b.rowsIn || 0).toLocaleString(); }
+
 const PSTEPS = [
-  { n: 1, t: "Upload & ingest", lane: "auto", out: function (b) { return b.rowsIn.toLocaleString() + " rows · stamped"; } },
-  { n: 2, t: "Clean & standardize", lane: "auto", out: function (b) { return b.rowsIn.toLocaleString() + " standardized · 12 cols"; } },
-  { n: 3, t: "Fill missing (ISRC lookup)", lane: "auto", out: function () { return "318 enriched · 41 → null"; } },
-  { n: 4, t: "Find duplicates", lane: "auto", out: function () { return "187 dup-ISRC · 223 similar pairs"; } },
-  { n: 5, t: "Score & route", lane: "gate", out: function (b) { var n = (b.flaggedRows || []).length; return "auto 283 · review " + n + " · drop 63"; } },
+  { n: 1, t: "Upload & ingest", lane: "auto", out: function (b) { return rows(b) + " rows · stamped"; } },
+  { n: 2, t: "Clean & standardize", lane: "auto", out: function (b) { return rows(b) + " standardized"; } },
+  { n: 3, t: "Fill missing (ISRC lookup)", lane: "auto", out: function (b) { var m = b.metrics || {}; return m.enriched != null ? n(m.enriched) + " enriched" : "—"; } },
+  { n: 4, t: "Find duplicates", lane: "auto", out: function (b) { var m = b.metrics || {}; return m.duplicates != null ? n(m.duplicates) + " duplicates" : "—"; } },
+  { n: 5, t: "Score & route", lane: "gate", out: function (b) { var m = b.metrics || {}; var rev = (b.flaggedRows || []).length; return m.autoMerged != null ? "auto " + n(m.autoMerged) + " · review " + rev + " · drop " + n(m.dropped || 0) : "review " + rev; } },
   { n: 6, t: "Human review", lane: "human", out: function (b) { return (b.flaggedRows || []).length + " records await you"; } },
-  { n: 7, t: "Build master & outputs", lane: "auto", out: function (b) { return b.rowsIn.toLocaleString() + " → " + (b.rowsOut || "—"); } },
+  { n: 7, t: "Build master & outputs", lane: "auto", out: function (b) { return rows(b) + " → " + (b.rowsOut != null ? b.rowsOut.toLocaleString() : "—"); } },
 ];
 
 export function PipelineRun({ ctx }) {

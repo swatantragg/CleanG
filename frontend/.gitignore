@@ -9,6 +9,11 @@ dist-ssr/
 # Vite / cache
 .vite/
 
+# Env files (keep .env.example tracked)
+.env
+.env.local
+!.env.example
+
 # Logs
 npm-debug.log*
 *.log

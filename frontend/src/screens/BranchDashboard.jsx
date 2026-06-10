@@ -1,107 +1,144 @@
 /* ============================================================
-   Branch Dashboard — your branches + read-only access to others'
+   Branch Dashboard — your branches and their retention lifecycle.
    ============================================================ */
-import React from "react";
-import { Icon, Avatar, StatusPill, OwnerDot } from "../components/ui.jsx";
+import React, { useState } from "react";
+import { Icon, Modal, LifecyclePill } from "../components/ui.jsx";
+import { expiryLabel, fmtDate } from "../util.js";
 
 export function BranchDashboard({ ctx }) {
-  const me = ctx.user(ctx.currentUserId);
-  const mine = ctx.branches.filter(function (b) { return b.owner === ctx.currentUserId; });
-  const others = ctx.branches.filter(function (b) { return b.owner !== ctx.currentUserId; });
-  const awaiting = mine.filter(function (b) { return b.status === "awaiting-review"; }).length;
-  const cleaned = mine.reduce(function (s, b) { return s + (b.rowsOut || 0); }, 0);
+  const [modal, setModal] = useState(null); // {name, presetId, visibility, busy, err}
+  const [delId, setDelId] = useState(null);
+  const branches = ctx.branches;
+  const presetName = (id) => { const p = ctx.presets.find((x) => x.id === id); return p ? p.name : "No preset"; };
 
-  return React.createElement("div", { className: "page fade" },
-    React.createElement("div", { className: "acct-banner" },
-      React.createElement(Avatar, { user: me, size: 46 }),
-      React.createElement("div", { className: "ab-meta" },
-        React.createElement("div", { className: "nm" }, me.name),
-        React.createElement("div", { className: "em" }, me.email || "")),
-      React.createElement("div", { className: "ab-right" },
-        React.createElement("span", { className: "badge plain", style: { fontWeight: 600 } }, me.role),
-        React.createElement("span", { className: "badge ok" },
-          React.createElement("span", { className: "dot-own", style: { background: "var(--ok)" } }), "Signed in"))),
+  const active = branches.filter((b) => b.status === "active");
+  const shared = active.filter((b) => b.visibility === "shared");
 
-    React.createElement("div", { className: "page-head between" },
-      React.createElement("div", null,
-        React.createElement("div", { className: "ey" }, "Workspace"),
-        React.createElement("h1", null, "Branches"),
-        React.createElement("div", { className: "sub" }, "Every cleanse lives in its own isolated branch under its owner. Nothing is centralized — you can browse anyone's work, but it is never auto-merged into yours.")),
-      React.createElement("button", { className: "btn pri", onClick: function () { ctx.startNewBranch(); } },
-        React.createElement(Icon, { name: "plus", size: 16 }), "New branch")),
-
-    React.createElement("div", { className: "stats", style: { marginBottom: 28 } },
-      stat("Your branches", mine.length, ""),
-      stat("Awaiting your review", awaiting, "", awaiting ? "accent" : ""),
-      stat("Records you've cleaned", cleaned.toLocaleString(), "across sealed branches"),
-      stat("Cross-accessible", ctx.branches.length, "all branches · read-only")),
-
-    React.createElement("div", { className: "sectitle" }, "Your branches"),
-    mine.length
-      ? React.createElement("div", { className: "branchgrid", style: { marginBottom: 30 } },
-          mine.map(function (b) { return React.createElement(BranchCard, { key: b.id, branch: b, ctx: ctx, owned: true }); }))
-      : React.createElement("div", { className: "empty" }, "No branches yet — start one with New branch."),
-
-    React.createElement("div", { className: "sectitle" },
-      React.createElement(Icon, { name: "eye", size: 13, style: { verticalAlign: "-2px", marginRight: 6 } }),
-      "Other users' branches · read-only"),
-    React.createElement("div", { className: "branchgrid" },
-      others.map(function (b) { return React.createElement(BranchCard, { key: b.id, branch: b, ctx: ctx, owned: false }); })));
-}
-
-function stat(k, v, d, cls) {
-  return React.createElement("div", { className: "stat", key: k },
-    React.createElement("div", { className: "k" }, k),
-    React.createElement("div", { className: "v " + (cls || "") }, v),
-    d ? React.createElement("div", { className: "d" }, d) : null);
-}
-
-export function BranchCard({ branch, ctx, owned }) {
-  const owner = ctx.user(branch.owner);
-  const ds = ctx.dataset(branch.dataset);
-  const fileName = branch.files && branch.files[0] ? branch.files[0].file : ds ? ds.file : "—";
-  const fileLabel = branch.files && branch.files.length > 1 ? branch.files.length + " files" : fileName;
-  const pct = branch.rowsOut ? Math.round(branch.rowsOut / branch.rowsIn * 100) : null;
-  const flagged = branch.flaggedRows || [];
-  const del = branch.review && branch.review.deleted || [];
-  const reviewN = branch.review && branch.review.submitted ? 0 : flagged.filter(function (id) { return del.indexOf(id) < 0; }).length;
-
-  let segs;
-  if (branch.status === "setup") {
-    segs = [["var(--accent-line)", 12], ["var(--surface-3)", 88]];
-  } else if (branch.status === "running") {
-    segs = [["var(--accent)", branch.pipeline.step / 7 * 100], ["var(--surface-3)", 100 - branch.pipeline.step / 7 * 100]];
-  } else if (branch.status === "awaiting-review") {
-    const total = flagged.length || 1;
-    const reviewed = total - reviewN;
-    segs = [["var(--accent)", 70], ["var(--human)", reviewed / total * 30], ["var(--surface-3)", reviewN / total * 30]];
-  } else {
-    segs = [["var(--accent)", 100]];
+  function openCreate() {
+    const sys = ctx.presets.find((p) => p.ownerId == null);
+    setModal({ name: "", presetId: sys ? sys.id : null, visibility: "shared", busy: false, err: null });
   }
+  function submitCreate() {
+    const name = (modal.name || "").trim();
+    if (!name) { setModal((m) => ({ ...m, err: "Branch name is required." })); return; }
+    setModal((m) => ({ ...m, busy: true, err: null }));
+    ctx.createBranch({ name, presetId: modal.presetId, visibility: modal.visibility })
+      .then((b) => { setModal(null); ctx.openBranch(b.id); })
+      .catch((e) => setModal((m) => ({ ...m, busy: false, err: e.message || "Could not create branch." })));
+  }
+  function confirmDelete() { const id = delId; setDelId(null); ctx.deleteBranch(id).catch((e) => ctx.toast(e.message || "Delete failed.")); }
 
-  return React.createElement("div", { className: "branch", onClick: function () { ctx.openBranch(branch.id); } },
-    owned ? React.createElement("button", {
-      className: "branch-del", title: "Delete branch",
-      onClick: function (e) { e.stopPropagation(); ctx.confirmDelete(branch.id); },
-    }, React.createElement(Icon, { name: "trash", size: 15 })) : null,
-    React.createElement("div", { className: "bh" },
-      React.createElement(OwnerDot, { user: owner }),
-      React.createElement("span", { className: "nm" }, branch.name),
-      React.createElement("div", { style: { marginLeft: "auto", marginRight: owned ? 30 : 0 } }, React.createElement(StatusPill, { status: branch.status }))),
-    React.createElement("div", { className: "muted", style: { fontSize: 13 } },
-      (owned ? "You" : owner.name) + " · " + (branch.preset || "setup in progress")),
-    React.createElement("div", { className: "mono", style: { fontSize: 11, color: "var(--ink-3)", marginTop: 2 } }, fileLabel),
-    React.createElement("div", { className: "bar" },
-      segs.map(function (s, i) { return React.createElement("i", { key: i, style: { width: s[1] + "%", background: s[0] } }); })),
-    React.createElement("div", { className: "figs" },
-      React.createElement("span", null, "in ", React.createElement("b", null, (branch.rowsIn || 0).toLocaleString())),
-      React.createElement("span", null, "out ", React.createElement("b", null, branch.rowsOut ? branch.rowsOut.toLocaleString() : "—")),
-      React.createElement("span", null, "G ", React.createElement("b", null, branch.gMatches)),
-      branch.status === "setup"
-        ? React.createElement("span", { style: { marginLeft: "auto", color: "var(--ink-3)" } }, "resume setup →")
-        : branch.status === "awaiting-review" && reviewN
-          ? React.createElement("span", { style: { marginLeft: "auto", color: "var(--human-ink)", fontWeight: 600 } }, reviewN + " to review")
-          : branch.status === "running"
-            ? React.createElement("span", { style: { marginLeft: "auto", color: "var(--human-ink)" } }, "step " + branch.pipeline.step + "/7")
-            : React.createElement("span", { style: { marginLeft: "auto" } }, pct ? pct + "% kept" : "")));
+  return (
+    <div className="page fade">
+      <div className="page-head between">
+        <div>
+          <div className="ey">Workspace</div>
+          <h1>Branches</h1>
+          <div className="sub">Each branch holds your uploaded source files and one cleaned output. Branches expire and are purged automatically — the row stays as history.</div>
+        </div>
+        <button className="btn pri" onClick={openCreate}><Icon name="plus" size={16} />New branch</button>
+      </div>
+
+      <div className="stats" style={{ marginBottom: 28 }}>
+        <Stat k="Total branches" v={branches.length} />
+        <Stat k="Active" v={active.length} cls="accent" />
+        <Stat k="Shared" v={shared.length} d="visible to your team" />
+        <Stat k="Deleted" v={branches.filter((b) => b.status !== "active").length} d="history kept" />
+      </div>
+
+      <div className="sectitle">Your branches</div>
+      {branches.length ? (
+        <div className="branchgrid">
+          {branches.map((b) => (
+            <BranchCard key={b.id} branch={b} presetName={presetName(b.presetId)} onOpen={() => ctx.openBranch(b.id)}
+              onDelete={b.status === "active" ? () => setDelId(b.id) : null} />
+          ))}
+        </div>
+      ) : (
+        <div className="empty">No branches yet — start one with <b>New branch</b>.</div>
+      )}
+
+      {modal ? (
+        <Modal title="New branch" onClose={() => setModal(null)} width={480}>
+          <label className="field-label">Branch name<span className="req">*</span></label>
+          <input className={"tinput" + (modal.err ? " err" : "")} autoFocus value={modal.name} placeholder="e.g. PDL Q2 catalog cleanse"
+            disabled={modal.busy} onChange={(e) => setModal((m) => ({ ...m, name: e.target.value, err: null }))}
+            onKeyDown={(e) => { if (e.key === "Enter") submitCreate(); }} />
+          {modal.err ? <div className="field-err">{modal.err}</div> : null}
+
+          <label className="field-label" style={{ marginTop: 14 }}>Cleaning preset</label>
+          <select className="tinput" value={modal.presetId ?? ""} disabled={modal.busy}
+            onChange={(e) => setModal((m) => ({ ...m, presetId: e.target.value ? Number(e.target.value) : null }))}>
+            <option value="">No preset</option>
+            {ctx.presets.map((p) => (
+              <option key={p.id} value={p.id}>{p.name}{p.ownerId == null ? " (system)" : ""}</option>
+            ))}
+          </select>
+
+          <label className="field-label" style={{ marginTop: 14 }}>Visibility</label>
+          <div className="row" style={{ gap: 10 }}>
+            {["shared", "private"].map((v) => (
+              <button key={v} type="button" className={"chip-toggle" + (modal.visibility === v ? " on" : "")}
+                onClick={() => setModal((m) => ({ ...m, visibility: v }))}
+                style={{ flex: 1, padding: "10px 12px", borderRadius: 10, border: "1px solid var(--line)", background: modal.visibility === v ? "var(--accent-soft)" : "var(--surface)", cursor: "pointer", textAlign: "left" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, fontWeight: 600 }}>
+                  <Icon name={v === "shared" ? "globe" : "lock"} size={15} />{v === "shared" ? "Shared" : "Private"}
+                </div>
+                <div className="muted" style={{ fontSize: 12, marginTop: 3 }}>{v === "shared" ? "Team can download the cleaned file" : "Only you can access it"}</div>
+              </button>
+            ))}
+          </div>
+
+          <div className="modal-actions">
+            <button className="btn ghost" onClick={() => setModal(null)}>Cancel</button>
+            <button className="btn pri" disabled={modal.busy} onClick={submitCreate}>{modal.busy ? "Creating…" : "Create & upload →"}</button>
+          </div>
+        </Modal>
+      ) : null}
+
+      {delId ? (
+        <Modal title="Delete this branch?" onClose={() => setDelId(null)} width={440}>
+          <p style={{ marginTop: -4, fontSize: 14 }}>The branch is soft-deleted — it stays as a history record and its files are purged from storage after expiry. This can't be undone.</p>
+          <div className="modal-actions">
+            <button className="btn ghost" onClick={() => setDelId(null)}>Cancel</button>
+            <button className="btn" style={{ background: "var(--danger)", borderColor: "var(--danger)", color: "#fff" }} onClick={confirmDelete}>
+              <Icon name="alert" size={15} />Delete branch
+            </button>
+          </div>
+        </Modal>
+      ) : null}
+    </div>
+  );
+}
+
+function Stat({ k, v, d, cls }) {
+  return <div className="stat"><div className="k">{k}</div><div className={"v " + (cls || "")}>{v}</div>{d ? <div className="d">{d}</div> : null}</div>;
+}
+
+function BranchCard({ branch, presetName, onOpen, onDelete }) {
+  return (
+    <div className="branch" onClick={onOpen}>
+      {onDelete ? (
+        <button className="branch-del" title="Delete branch" onClick={(e) => { e.stopPropagation(); onDelete(); }}>
+          <Icon name="trash" size={15} />
+        </button>
+      ) : null}
+      <div className="bh">
+        <span className="nm">{branch.name}</span>
+        <div style={{ marginLeft: "auto", marginRight: onDelete ? 30 : 0 }}><LifecyclePill status={branch.status} /></div>
+      </div>
+      <div className="muted" style={{ fontSize: 13 }}>{presetName}</div>
+      <div className="row" style={{ gap: 8, marginTop: 8, fontSize: 12.5, color: "var(--ink-3)", alignItems: "center" }}>
+        <Icon name={branch.visibility === "shared" ? "globe" : "lock"} size={13} />
+        <span>{branch.visibility === "shared" ? "Shared" : "Private"}</span>
+        <span className="sep" style={{ opacity: 0.4 }}>·</span>
+        <Icon name="clock" size={13} />
+        <span>{expiryLabel(branch)}</span>
+      </div>
+      <div className="figs" style={{ marginTop: 10 }}>
+        <span>created <b>{fmtDate(branch.createdAt)}</b></span>
+        <span style={{ marginLeft: "auto", color: "var(--accent-ink)" }}>open →</span>
+      </div>
+    </div>
+  );
 }

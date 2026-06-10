@@ -28,6 +28,11 @@ const ICONS = {
   spark: "M12 3l2 6 6 2-6 2-2 6-2-6-6-2 6-2z",
   user: "M12 12a4 4 0 100-8 4 4 0 000 8zM4 21a8 8 0 0116 0",
   trash: "M4 7h16M9 7V5a1 1 0 011-1h4a1 1 0 011 1v2M6 7l1 13h10l1-13",
+  download: "M12 4v12M7 11l5 5 5-5M5 20h14",
+  clock: "M12 7v5l3 2M12 21a9 9 0 100-18 9 9 0 000 18z",
+  globe: "M12 21a9 9 0 100-18 9 9 0 000 18zM3 12h18M12 3c3 3 3 15 0 18M12 3c-3 3-3 15 0 18",
+  sparkle: "M12 3l2 6 6 2-6 2-2 6-2-6-6-2 6-2z",
+  refresh: "M3 12a9 9 0 0115-6.7L21 8M21 3v5h-5M21 12a9 9 0 01-15 6.7L3 16M3 21v-5h5",
 };
 
 export function Icon({ name, size = 18, className = "", style = {} }) {
@@ -57,6 +62,18 @@ export const STATUS_LABEL = {
 
 export function StatusPill({ status }) {
   return React.createElement("span", { className: "status " + status }, STATUS_LABEL[status] || status);
+}
+
+// Lifecycle status (matches the DB branches.status enum).
+export const LIFECYCLE_LABEL = {
+  active: "Active",
+  expired: "Expired",
+  deleted: "Deleted",
+  purge_failed: "Purge failed",
+};
+
+export function LifecyclePill({ status }) {
+  return React.createElement("span", { className: "status lc-" + status }, LIFECYCLE_LABEL[status] || status);
 }
 
 export function OwnerDot({ user }) {

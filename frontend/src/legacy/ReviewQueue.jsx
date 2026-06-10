@@ -3,7 +3,6 @@
    ============================================================ */
 import React, { useState, useEffect } from "react";
 import { Icon, confBand } from "../components/ui.jsx";
-import { CD } from "../data/mockData.js";
 
 export function ReviewQueue({ ctx }) {
   const b = ctx.activeBranch;
@@ -65,7 +64,8 @@ export function ReviewQueue({ ctx }) {
           React.createElement("th", null, "Issue"))),
         React.createElement("tbody", null,
           liveIds.map(function (id) {
-            const row = CD.reviewRow(id);
+            const row = ctx.reviewRow(id);
+            if (!row) return null;
             const isSel = selected.indexOf(id) >= 0;
             const curVal = rv.edits[id] != null ? rv.edits[id] : row.value == null ? "" : row.value;
             const isEdited = rv.edits[id] != null;

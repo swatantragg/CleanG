@@ -5,7 +5,8 @@
 import React, { useState, useMemo, useRef } from "react";
 import * as XLSX from "xlsx";
 import { Icon } from "../components/ui.jsx";
-import { CD } from "../data/mockData.js";
+
+const MB_20 = 20 * 1024 * 1024;
 
 export function BranchSetupWizard({ ctx }) {
   const b = ctx.activeBranch;
@@ -40,6 +41,7 @@ function humanSize(bytes) {
 }
 
 function UploadStep({ ctx, b, next }) {
+  const maxBytes = (ctx.config && ctx.config.maxBytes) || MB_20;
   const files = b.files || [];
   const hasError = files.some(function (f) { return f.error; });
   const validCount = files.filter(function (f) { return !f.error; }).length;
@@ -63,7 +65,7 @@ function UploadStep({ ctx, b, next }) {
 
       if (!okType) { done({ error: "Unsupported type — only CSV or XLSX files are allowed." }); return; }
       if (file.size === 0) { done({ error: "Empty file — 0 KB. Nothing to read." }); return; }
-      if (file.size > CD.MAX_BYTES) { done({ error: "Exceeds the 20 MB per-file limit." }); return; }
+      if (file.size > maxBytes) { done({ error: "Exceeds the 20 MB per-file limit." }); return; }
 
       const reader = new FileReader();
       reader.onload = function (e) {
@@ -195,13 +197,15 @@ function PresetStep({ ctx, b, back }) {
     const custom = isCustom ? [{ name: pk, type: "key" }].concat(custCols) : null;
     ctx.finishSetup(b.id, sel, custom);
   }
-  const preset = CD.PRESETS[sel];
+  const presets = (ctx.config && ctx.config.presets) || {};
+  const presetOrder = (ctx.config && ctx.config.presetOrder) || [];
+  const preset = presets[sel];
 
   return React.createElement("div", null,
     React.createElement("p", { style: { maxWidth: 680, marginTop: -6 } }, "Choose how G-Cleanser cleans and shapes the output. Each preset carries its own cleaning rules and column set. Your primary key ", React.createElement("b", { className: "mono", style: { color: "var(--accent-ink)" } }, pk), " is always the first output column."),
     React.createElement("div", { className: "preset-grid" },
-      CD.PRESET_ORDER.map(function (name) {
-        const p = CD.PRESETS[name];
+      presetOrder.map(function (name) {
+        const p = presets[name];
         return React.createElement("button", { key: name, className: "preset" + (sel === name ? " sel" : "") + (name === "Custom" ? " custom" : ""), onClick: function () { setSel(name); } },
           React.createElement("div", { className: "pt" }, name === "Custom" ? "Build your own" : p.tag),
           React.createElement("h4", null, name),

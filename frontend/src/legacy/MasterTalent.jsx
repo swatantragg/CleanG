@@ -3,17 +3,17 @@
    ============================================================ */
 import React from "react";
 import { Icon, cell } from "../components/ui.jsx";
-import { CD } from "../data/mockData.js";
 import { StatCard, PageHead, outputColumns, colValue } from "./helpers.jsx";
 
-export function deriveMaster(b) {
-  let recs = CD.RECORDS.slice();
+// Apply the branch's review decisions (deletes + edits) onto the source records.
+export function deriveMaster(b, records, reviewRow, fieldMap) {
+  let recs = (records || []).slice();
   const rv = b.review || { edits: {}, deleted: [] };
-  const delRecs = (rv.deleted || []).map(function (id) { return CD.reviewRow(id); }).filter(Boolean).map(function (r) { return r.rec; });
+  const delRecs = (rv.deleted || []).map(function (id) { return reviewRow(id); }).filter(Boolean).map(function (r) { return r.rec; });
   recs = recs.filter(function (r) { return delRecs.indexOf(r.rec) < 0; });
   Object.keys(rv.edits || {}).forEach(function (id) {
-    const row = CD.reviewRow(id); if (!row) return;
-    const key = CD.FIELD_MAP[row.field]; if (!key) return;
+    const row = reviewRow(id); if (!row) return;
+    const key = (fieldMap || {})[row.field]; if (!key) return;
     recs = recs.map(function (r) { return r.rec === row.rec ? Object.assign({}, r, (function () { const o = {}; o[key] = rv.edits[id]; return o; })()) : r; });
   });
   return recs;
@@ -41,8 +41,9 @@ export function MasterTalent({ ctx }) {
         React.createElement("div", { className: "big" }, "Submit your review to build the master"),
         React.createElement("button", { className: "btn pri", style: { marginTop: 16 }, onClick: function () { ctx.go("review"); } }, "Go to review →")));
   }
-  const recs = deriveMaster(b);
-  const cols = outputColumns(b);
+  const fieldMap = (ctx.config && ctx.config.fieldMap) || {};
+  const recs = deriveMaster(b, ctx.records, ctx.reviewRow, fieldMap);
+  const cols = outputColumns(b, ctx.config);
   const talent = talentFrom(recs);
   const delCount = b.review && b.review.deleted ? b.review.deleted.length : b.deleted || 0;
   const editCount = b.review && b.review.edits ? Object.keys(b.review.edits).length : 0;
@@ -72,7 +73,7 @@ export function MasterTalent({ ctx }) {
                 return React.createElement("tr", { key: r.rec },
                   React.createElement("td", { className: "mono" }, r.rec),
                   cols.map(function (c, i) {
-                    const v = colValue(r, c);
+                    const v = colValue(r, c, fieldMap);
                     return React.createElement("td", { key: c, className: i === 0 ? "isrc" : "" }, cell(v));
                   }));
               })))) ),

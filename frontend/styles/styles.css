@@ -297,6 +297,10 @@ button { font: inherit; cursor: pointer; }
 .status.setup { color: var(--ink-2); background: var(--surface-3); }
 .status.awaiting-review { color: var(--accent-ink); background: var(--accent-soft); }
 .status.sealed { color: var(--ink-2); background: var(--surface-3); }
+.status.lc-active { color: var(--accent-ink); background: var(--accent-soft); }
+.status.lc-expired { color: var(--human-ink); background: var(--human-soft); }
+.status.lc-deleted { color: var(--ink-2); background: var(--surface-3); }
+.status.lc-purge_failed { color: var(--danger-ink); background: var(--danger-soft); }
 
 /* commit log */
 .commits { position: relative; padding-left: 6px; }

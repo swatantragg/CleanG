@@ -21,3 +21,8 @@ __pycache__/
 *.py[cod]
 .venv/
 venv/
+
+# Env files (keep .env.example tracked)
+.env
+.env.local
+!.env.example

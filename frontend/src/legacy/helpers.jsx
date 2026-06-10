@@ -2,7 +2,6 @@
    Shared screen helpers — stat cards, page heads, output columns
    ============================================================ */
 import React from "react";
-import { CD } from "../data/mockData.js";
 
 export function StatCard(k, v, d, cls) {
   return React.createElement("div", { className: "stat", key: k },
@@ -19,19 +18,20 @@ export function PageHead(ey, title, sub) {
 }
 
 /* output columns for a branch — primary key always first */
-export function outputColumns(branch) {
+export function outputColumns(branch, config) {
   const pk = branch.primaryKey || "ISRC";
   if (branch.preset === "Custom" && branch.customColumns) {
     const names = branch.customColumns.map(function (c) { return c.name; });
     return names.indexOf(pk) >= 0 ? names : [pk].concat(names.filter(function (n) { return n !== pk; }));
   }
-  const p = CD.PRESETS[branch.preset];
+  const presets = (config && config.presets) || {};
+  const p = presets[branch.preset];
   const cols = p && p.columns ? p.columns.slice() : ["Track Name", "Singer", "Composer", "Label"];
   return [pk].concat(cols.filter(function (c) { return c !== pk; }));
 }
 
-export function colValue(rec, colName) {
-  const key = CD.FIELD_MAP[colName];
+export function colValue(rec, colName, fieldMap) {
+  const key = (fieldMap || {})[colName];
   if (!key) return null;
   return rec[key];
 }
