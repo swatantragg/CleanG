@@ -30,6 +30,19 @@ export function expiryLabel(branch) {
   return "Expires in " + mins + " min";
 }
 
+// Trigger a file download from a (signed) URL. Uses a programmatic <a> click rather
+// than window.open — window.open after an async call is killed by popup blockers since
+// the user-gesture is gone. The stream endpoint serves Content-Disposition: attachment.
+export function triggerDownload(url) {
+  const a = document.createElement("a");
+  a.href = url;
+  a.rel = "noopener";
+  a.style.display = "none";
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(function () { a.remove(); }, 0);
+}
+
 export function initials(name) {
   return (name || "?").trim().split(/\s+/).map(function (s) { return s[0]; }).slice(0, 2).join("").toUpperCase();
 }

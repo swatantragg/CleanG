@@ -3,7 +3,7 @@
    ============================================================ */
 import React, { useState } from "react";
 import { Icon, Modal, LifecyclePill } from "../components/ui.jsx";
-import { expiryLabel, fmtDate } from "../util.js";
+import { expiryLabel } from "../util.js";
 
 export function BranchDashboard({ ctx }) {
   const [modal, setModal] = useState(null); // {name, presetId, visibility, busy, err}
@@ -46,16 +46,16 @@ export function BranchDashboard({ ctx }) {
         <Stat k="Deleted" v={branches.filter((b) => b.status !== "active").length} d="history kept" />
       </div>
 
-      <div className="sectitle">Your branches</div>
-      {branches.length ? (
-        <div className="branchgrid">
-          {branches.map((b) => (
-            <BranchCard key={b.id} branch={b} presetName={presetName(b.presetId)} onOpen={() => ctx.openBranch(b.id)}
-              onDelete={b.status === "active" ? () => setDelId(b.id) : null} />
+      <div className="sectitle">Your active branches</div>
+      {active.length ? (
+        <div className="branchlist">
+          {active.map((b) => (
+            <BranchRow key={b.id} branch={b} presetName={presetName(b.presetId)} onOpen={() => ctx.openBranch(b.id)}
+              onDelete={() => setDelId(b.id)} />
           ))}
         </div>
       ) : (
-        <div className="empty">No branches yet — start one with <b>New branch</b>.</div>
+        <div className="empty">No active branches — start one with <b>New branch</b>{branches.length ? <> · deleted ones are under <b>Branch History</b></> : null}.</div>
       )}
 
       {modal ? (
@@ -106,30 +106,27 @@ function Stat({ k, v, d, cls }) {
   return <div className="stat"><div className="k">{k}</div><div className={"v " + (cls || "")}>{v}</div>{d ? <div className="d">{d}</div> : null}</div>;
 }
 
-function BranchCard({ branch, presetName, onOpen, onDelete }) {
+function BranchRow({ branch, presetName, onOpen, onDelete }) {
   return (
-    <div className="branch" onClick={onOpen}>
+    <div className="branchrow" onClick={onOpen}>
+      <span className="nm">{branch.name}</span>
+      <LifecyclePill status={branch.status} />
+      <div className="rmeta">
+        <Icon name={branch.visibility === "shared" ? "globe" : "lock"} size={13} />
+        <span>{branch.visibility === "shared" ? "Shared" : "Private"}</span>
+        <span className="sep hide-sm">·</span>
+        <span className="hide-sm">{presetName}</span>
+        <span className="sep hide-sm">·</span>
+        <Icon name="clock" size={13} className="hide-sm" />
+        <span className="hide-sm">{expiryLabel(branch)}</span>
+      </div>
+      <div className="spacer" />
+      <span className="open">open →</span>
       {onDelete ? (
-        <button className="branch-del" title="Delete branch" onClick={(e) => { e.stopPropagation(); onDelete(); }}>
+        <button className="row-del" title="Delete branch" onClick={(e) => { e.stopPropagation(); onDelete(); }}>
           <Icon name="trash" size={15} />
         </button>
       ) : null}
-      <div className="bh">
-        <span className="nm">{branch.name}</span>
-        <div style={{ marginLeft: "auto", marginRight: onDelete ? 30 : 0 }}><LifecyclePill status={branch.status} /></div>
-      </div>
-      <div className="muted" style={{ fontSize: 13 }}>{presetName}</div>
-      <div className="row" style={{ gap: 8, marginTop: 8, fontSize: 12.5, color: "var(--ink-3)", alignItems: "center" }}>
-        <Icon name={branch.visibility === "shared" ? "globe" : "lock"} size={13} />
-        <span>{branch.visibility === "shared" ? "Shared" : "Private"}</span>
-        <span className="sep" style={{ opacity: 0.4 }}>·</span>
-        <Icon name="clock" size={13} />
-        <span>{expiryLabel(branch)}</span>
-      </div>
-      <div className="figs" style={{ marginTop: 10 }}>
-        <span>created <b>{fmtDate(branch.createdAt)}</b></span>
-        <span style={{ marginLeft: "auto", color: "var(--accent-ink)" }}>open →</span>
-      </div>
     </div>
   );
 }

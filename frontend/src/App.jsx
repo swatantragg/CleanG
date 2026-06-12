@@ -8,11 +8,11 @@ import { Icon, Avatar } from "./components/ui.jsx";
 import { Authentication } from "./screens/Authentication.jsx";
 import { BranchDashboard } from "./screens/BranchDashboard.jsx";
 import { BranchDetail } from "./screens/BranchDetail.jsx";
+import { BranchHistory } from "./screens/BranchHistory.jsx";
 import { SharedBrowser } from "./screens/SharedBrowser.jsx";
 import { initials } from "./util.js";
 
-const ACCENT = ["oklch(0.458 0.210 310)", "oklch(0.330 0.160 312)", "oklch(0.955 0.035 313)", "oklch(0.820 0.090 312)"];
-const NAV_TITLE = { dashboard: "Branches", shared: "Shared Branches", branch: "Branch" };
+const NAV_TITLE = { dashboard: "Branches", shared: "Shared Branches", history: "Branch History", branch: "Branch" };
 
 function initialTheme() {
   try { const s = localStorage.getItem("gc-theme"); if (s === "dark" || s === "light") return s; } catch (e) {}
@@ -31,11 +31,8 @@ export default function App() {
   const [theme, setTheme] = useState(initialTheme);
 
   useEffect(() => { document.documentElement.setAttribute("data-theme", theme); try { localStorage.setItem("gc-theme", theme); } catch (e) {} }, [theme]);
-  useEffect(() => {
-    const r = document.documentElement.style;
-    r.setProperty("--accent", ACCENT[0]); r.setProperty("--accent-ink", ACCENT[1]);
-    r.setProperty("--accent-soft", ACCENT[2]); r.setProperty("--accent-line", ACCENT[3]);
-  }, []);
+  // NOTE: the accent ramp lives in styles.css (with per-theme dark overrides). Don't set
+  // it inline on <html> — inline styles beat :root[data-theme="dark"] and break dark mode.
   useEffect(() => { if (!toast) return; const t = setTimeout(() => setToast(null), 2800); return () => clearTimeout(t); }, [toast]);
 
   const load = useCallback(() => Promise.all([api.presets.list(), api.branches.list()]).then(([p, b]) => { setPresets(p); setBranches(b); }), []);
@@ -86,6 +83,7 @@ export default function App() {
   let Screen = null;
   if (view.name === "dashboard") Screen = <BranchDashboard ctx={ctx} />;
   else if (view.name === "shared") Screen = <SharedBrowser ctx={ctx} />;
+  else if (view.name === "history") Screen = <BranchHistory ctx={ctx} />;
   else if (view.name === "branch") Screen = <BranchDetail ctx={ctx} branchId={view.branchId} />;
 
   return (
@@ -100,6 +98,9 @@ export default function App() {
             </button>
             <button className={"sb-item" + (view.name === "shared" ? " active" : "")} onClick={() => go("shared")}>
               <Icon name="cross" size={17} className="ico" /><span>Shared Branches</span>
+            </button>
+            <button className={"sb-item" + (view.name === "history" ? " active" : "")} onClick={() => go("history")}>
+              <Icon name="clock" size={17} className="ico" /><span>Branch History</span>
             </button>
           </div>
           {activeBranch ? (

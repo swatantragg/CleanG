@@ -23,6 +23,8 @@ class Visibility(str, Enum):
 class FileKind(str, Enum):
     source = "source"
     cleaned = "cleaned"
+    corrupted = "corrupted"
+    staging = "staging"
 
 
 class FileStatus(str, Enum):
@@ -118,6 +120,30 @@ class CleanRequest(BaseModel):
     primary_key: Optional[str] = None
     preset_id: Optional[int] = None
     columns: Optional[list[str]] = None  # custom mode: output columns besides the primary key
+
+
+class CleanResult(BaseModel):
+    """Outcome of a cleaning run: either finished, or held for human review."""
+    status: str  # "completed" | "review"
+    cleaned_file_id: Optional[int] = None
+    review_count: int = 0
+
+
+class ResolveBody(BaseModel):
+    """One operator decision on a flagged record. 'fix' writes the corrected values in
+    `fixes` (col → value); 'dismiss' keeps the record as-is; 'delete' drops it."""
+    action: str = Field(pattern="^(fix|dismiss|delete)$")
+    fixes: dict[str, str] = Field(default_factory=dict)
+
+
+class BulkResolveBody(BaseModel):
+    """Apply one decision to many records at once. 'accept' writes each record's suggested
+    fixes; 'dismiss' keeps them; 'delete' drops them. ids empty + all_pending=True targets
+    every pending record; `limit` caps how many are resolved per call (chunked progress)."""
+    ids: list[int] = Field(default_factory=list)
+    all_pending: bool = False
+    limit: Optional[int] = Field(default=None, ge=1)
+    action: str = Field(pattern="^(accept|dismiss|delete)$")
 
 
 class BranchWithOwner(BranchRead):

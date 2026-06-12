@@ -5,7 +5,7 @@
 import React, { useState, useEffect } from "react";
 import { api } from "../api/index.js";
 import { Icon, LifecyclePill } from "../components/ui.jsx";
-import { humanSize, fmtDate, expiryLabel } from "../util.js";
+import { humanSize, fmtDate, expiryLabel, triggerDownload } from "../util.js";
 
 export function SharedBrowser({ ctx }) {
   const [branches, setBranches] = useState(null);
@@ -17,7 +17,7 @@ export function SharedBrowser({ ctx }) {
   }, []);
 
   function download(fileId) {
-    api.files.signedUrl(fileId).then((r) => window.open(r.url, "_blank"))
+    api.files.signedUrl(fileId).then((r) => triggerDownload(r.url))
       .catch((err) => ctx.toast(err.message || "Download failed."));
   }
 

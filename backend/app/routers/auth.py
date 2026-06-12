@@ -9,9 +9,23 @@ from ..security import CurrentUser, create_access_token, hash_password, verify_p
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
+# Reserved / throwaway domains that produced the dummy accounts (x.com, example.*,
+# RFC-2606 test domains). Registrations here are rejected so junk data can't seed the DB.
+_BLOCKED_EMAIL_DOMAINS = {
+    "x.com", "example.com", "example.org", "example.net",
+    "test.com", "test", "localhost", "invalid", "mailinator.com",
+}
+
+
+def _reject_throwaway(email: str) -> None:
+    domain = email.rsplit("@", 1)[-1].lower()
+    if domain in _BLOCKED_EMAIL_DOMAINS:
+        raise HTTPException(422, "Please register with a real email address.")
+
 
 @router.post("/register", response_model=TokenResponse, status_code=201)
 async def register(body: UserCreate, db: AsyncSession = Depends(get_db)):
+    _reject_throwaway(str(body.email))
     exists = (await db.execute(select(User).where(User.email == body.email))).scalar_one_or_none()
     if exists:
         raise HTTPException(409, "An account with this email already exists.")

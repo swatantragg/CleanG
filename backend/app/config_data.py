@@ -67,7 +67,7 @@ PRESET_ORDER = [
 ]
 
 FIELD_MAP = {
-    "ISRC": "isrc", "UPC": "isrc", "Album cat. No.": "album", "Album Name": "album", "Album": "album",
+    "ISRC": "isrc", "UPC": "upc", "Album cat. No.": "albumcat", "Album Name": "album", "Album": "album",
     "Track Name": "track", "Track": "track", "Song": "track", "Title": "track", "Work Title": "track", "Episode Title": "track",
     "Release Date": "release", "Release": "release", "Publish Date": "release", "Air Date": "release",
     "Singer": "singer", "Artist": "singer", "Artist Name": "singer", "Primary Artists": "singer", "Host": "singer",
@@ -75,7 +75,7 @@ FIELD_MAP = {
     "Lyricist": "lyricist", "Writers": "lyricist", "Lyric Writer": "lyricist",
     "Composer": "composer", "Music By": "composer", "Director": "composer",
     "Label": "label", "Record Label": "label", "Publisher": "label", "Station": "label", "Show Name": "album",
-    "Go Live Date": "golive", "Duration": "golive", "Run Time": "golive",
+    "Go Live Date": "golive", "Duration": "duration", "Run Time": "duration",
 }
 
 # Canonical G-artist reference (variants resolved during cleansing).

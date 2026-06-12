@@ -60,6 +60,13 @@
   --line:        oklch(0.330 0.040 313);
   --line-2:      oklch(0.430 0.050 313);
 
+  /* Accent ramp must be re-derived for dark — otherwise --accent-soft stays a light
+     lavender and any text on it (e.g. the review diff cells) is invisible. */
+  --accent:      oklch(0.560 0.200 308);
+  --accent-ink:  oklch(0.840 0.120 308);
+  --accent-soft: oklch(0.320 0.070 308);
+  --accent-line: oklch(0.460 0.100 308);
+
   --human:       oklch(0.74 0.130 74);
   --human-ink:   oklch(0.82 0.110 76);
   --human-soft:  oklch(0.30 0.050 74);
@@ -291,6 +298,27 @@ button { font: inherit; cursor: pointer; }
 .branch .figs { display: flex; gap: 18px; font-size: 12.5px; color: var(--ink-3); }
 .branch .figs b { color: var(--ink); font-family: var(--mono); font-weight: 600; }
 .dot-own { width: 9px; height: 9px; border-radius: 50%; flex: none; }
+
+/* ===== Branch list (rows instead of cards) ===== */
+.branchlist { border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; background: var(--surface); box-shadow: var(--shadow-sm); }
+.branchrow {
+  display: flex; align-items: center; gap: 14px; width: 100%; text-align: left;
+  padding: 13px 16px; border-top: 1px solid var(--line); background: transparent;
+  cursor: pointer; transition: background .14s;
+}
+.branchrow:first-child { border-top: none; }
+.branchrow:hover { background: var(--surface-2); }
+.branchrow .nm { font-family: var(--display); font-weight: 600; font-size: 15px; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 280px; }
+.branchrow .rmeta { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--ink-3); flex-wrap: wrap; }
+.branchrow .rmeta .sep { opacity: 0.4; }
+.branchrow .spacer { margin-left: auto; }
+.branchrow .open { color: var(--accent-ink); font-size: 12.5px; font-weight: 600; white-space: nowrap; }
+.branchrow .row-del {
+  width: 30px; height: 30px; display: grid; place-items: center; border-radius: 8px;
+  border: 1px solid transparent; background: transparent; color: var(--ink-3); transition: all .14s; flex: none;
+}
+.branchrow .row-del:hover { background: var(--danger-soft); border-color: var(--danger-line); color: var(--danger-ink); }
+@media (max-width: 760px){ .branchrow .rmeta .hide-sm { display: none; } .branchrow .nm { max-width: 150px; } }
 
 .status { font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.05em; text-transform: uppercase; padding: 3px 9px; border-radius: 20px; }
 .status.running { color: var(--human-ink); background: var(--human-soft); }
@@ -650,3 +678,23 @@ hr.div { border: none; border-top: 1px solid var(--line); margin: 26px 0; }
   color: var(--ink-3); cursor: pointer; border-radius: 0 10px 10px 0;
 }
 .pw-toggle:hover { color: var(--ink); }
+
+/* ===== Review queue: multi-select + bulk action bar ===== */
+input[type="checkbox"] { accent-color: var(--accent); width: 15px; height: 15px; }
+.filecols.sel { border-color: var(--accent-line); box-shadow: 0 0 0 1px var(--accent-line) inset; }
+.bulkbar {
+  position: sticky; top: calc(var(--topbar-h) + 6px); z-index: 5;
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  margin: 0 0 12px; padding: 9px 12px; border-radius: var(--radius);
+  background: var(--accent-soft); border: 1px solid var(--accent-line);
+  box-shadow: var(--shadow-sm);
+}
+.bulkbar .bb-count { font-size: 13.5px; color: var(--accent-ink); margin-right: 4px; }
+.bulkbar .bb-count b { font-weight: 700; }
+
+/* progress bar (chunked delete) */
+.progress-wrap { margin: 0 0 16px; }
+.progress-head { display: flex; justify-content: space-between; font-size: 12.5px; color: var(--ink-2); margin-bottom: 6px; }
+.progress-head .mono { font-family: var(--mono); }
+.progress { height: 8px; border-radius: 6px; background: var(--surface-3); overflow: hidden; }
+.progress > i { display: block; height: 100%; background: var(--accent); border-radius: 6px; transition: width .2s ease; }

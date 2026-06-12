@@ -84,6 +84,16 @@ SIGNED_URL_TTL_SECONDS = int(_env("SIGNED_URL_TTL_SECONDS", "300") or "300")
 STORAGE_BACKEND = _env("STORAGE_BACKEND", "local").lower() or "local"
 GOOGLE_APPLICATION_CREDENTIALS = _env("GOOGLE_APPLICATION_CREDENTIALS")  # path to service-account JSON file
 GOOGLE_DRIVE_FOLDER_ID = _env("GOOGLE_DRIVE_FOLDER_ID")  # parent folder id for the cleaned files
+# Optional: Workspace user to impersonate via domain-wide delegation, giving the
+# service account real Drive quota. Leave blank when using a Shared Drive instead.
+GOOGLE_DRIVE_IMPERSONATE_SUBJECT = _env("GOOGLE_DRIVE_IMPERSONATE_SUBJECT")
+
+# OAuth user-delegation (the only Drive path that works with a free personal Gmail).
+# When GOOGLE_OAUTH_REFRESH_TOKEN is set, the app stores cleaned files in that user's
+# own Drive. Get the refresh token once via `python -m app.drive_auth client.json`.
+GOOGLE_OAUTH_CLIENT_ID = _env("GOOGLE_OAUTH_CLIENT_ID")
+GOOGLE_OAUTH_CLIENT_SECRET = _env("GOOGLE_OAUTH_CLIENT_SECRET")
+GOOGLE_OAUTH_REFRESH_TOKEN = _env("GOOGLE_OAUTH_REFRESH_TOKEN")
 
 # Branch retention
 BRANCH_TTL_DAYS = int(_env("BRANCH_TTL_DAYS", "7") or "7")

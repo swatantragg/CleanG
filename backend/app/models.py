@@ -101,7 +101,7 @@ class Branch(Base):
 class File(Base):
     __tablename__ = "files"
     __table_args__ = (
-        CheckConstraint("kind IN ('source','cleaned')", name="files_kind_check"),
+        CheckConstraint("kind IN ('source','cleaned','corrupted','staging')", name="files_kind_check"),
         CheckConstraint("status IN ('available','purged')", name="files_status_check"),
         Index("files_branch_id_idx", "branch_id"),
         Index("files_branch_kind_idx", "branch_id", "kind"),

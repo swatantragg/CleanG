@@ -59,6 +59,17 @@ export const api = {
       }
       return get(http.post("/branches/" + id + "/clean", body));
     },
+    review: function (id, opts) {
+      const p = opts || {};
+      const params = { offset: p.offset || 0, limit: p.limit || 50 };
+      if (p.status) params.status = p.status;
+      return get(http.get("/branches/" + id + "/review", { params: params }));
+    },
+    resolveReview: function (id, itemId, body) { return get(http.post("/branches/" + id + "/review/" + itemId, body)); },
+    bulkResolveReview: function (id, body) { return get(http.post("/branches/" + id + "/review/bulk", body)); },
+    finalize: function (id) { return get(http.post("/branches/" + id + "/finalize")); },
+    skip: function (id) { return get(http.post("/branches/" + id + "/skip")); },
+    cancelReview: function (id) { return http.delete("/branches/" + id + "/review"); },
     uploadSource: function (id, file) {
       const fd = new FormData();
       fd.append("file", file);
