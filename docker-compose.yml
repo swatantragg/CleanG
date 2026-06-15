@@ -1,0 +1,25 @@
+# Run backend + frontend together:  docker compose up --build
+# DB is external (Neon Postgres via backend/.env), so no db service here.
+
+services:
+  backend:
+    build: ./backend
+    container_name: mrm-backend
+    env_file:
+      - ./backend/.env          # DATABASE_URL, JWT_SECRET, CORS_ORIGINS, etc.
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        # Browser talks to the host-published backend port.
+        VITE_API_URL: http://localhost:8000/api
+    container_name: mrm-frontend
+    ports:
+      - "5174:80"               # matches CORS_ORIGINS in backend/.env
+    depends_on:
+      - backend
+    restart: unless-stopped
