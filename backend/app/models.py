@@ -95,7 +95,9 @@ class UploadedFile(Base):
     headers: Mapped[list] = mapped_column(JSON)
     # The extracted rows themselves — we do NOT keep the original file on disk.
     data: Mapped[list] = mapped_column(JSON, default=list)
-    # Master-centric mapping: [{master_column, position, input_header, confidence, method, needs_review}]
+    # Master-centric mapping:
+    #   [{master_column, position, input_header, extra_headers, confidence, method, needs_review}]
+    # `extra_headers` lets several input columns feed one master column (merged at clean time).
     mapping: Mapped[list] = mapped_column(JSON, default=list)
     warnings: Mapped[list] = mapped_column(JSON, default=list)
     # Human review overlay. Cleaning is computed in memory from `data` + `mapping`;

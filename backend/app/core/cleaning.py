@@ -25,6 +25,22 @@ from dataclasses import dataclass, field
 _ESCAPE = re.compile(r"_x[0-9A-Fa-f]{4}_")
 _ISRC = re.compile(r"^[A-Z]{2}[A-Z0-9]{3}[0-9]{7}$")
 
+# Delimiter used when several names / source columns are merged into one field.
+NAME_SEP = " | "
+# Split an input name cell on commas or pipes into individual names.
+_NAME_SPLIT = re.compile(r"\s*[|,]\s*")
+
+# Field types that hold one-or-more human names (people). These get per-name
+# Title-casing, comma/pipe splitting and name-shape validation.
+NAME_TYPES = {"name"}
+# Field types that hold a single proper title (album / track). Title-cased and
+# shape-checked, but NOT split on commas (a title may legitimately contain one).
+TITLE_TYPES = {"title"}
+
+# Symbols that should never appear in a real name or title -> human review.
+# (Apostrophe, hyphen, period, parentheses, ampersand and comma are allowed.)
+_SUSPECT_CHARS = set("$%@#^*=+~<>{}[]\\\"`")
+
 # --- field type per master column -----------------------------------------
 FIELD_TYPES: dict[str, str] = {
     "Record #": "serial",
@@ -33,8 +49,8 @@ FIELD_TYPES: dict[str, str] = {
     "Date Submitted": "date",
     "UPC": "upc",
     "Album cat. No.": "code",
-    "Album Name": "text",
-    "Track Name": "text",
+    "Album Name": "title",
+    "Track Name": "title",
     "Release Date": "date",
     "Singer": "name",
     "Audio Duration (mm:sec)": "duration",
@@ -73,7 +89,10 @@ TAG_LABELS = {
     "invalid_category": "Unexpected value",
     "suspect_value": "Doesn't look right",
     "missing_required": "Missing required value",
+    "garbled_value": "Corrupted / unreadable value",
     "duplicate": "Duplicate record",
+    "possible_duplicate": "Possible duplicate — needs review",
+    "upc_album_mismatch": "UPC ↔ Album mismatch",
 }
 
 # Human-readable labels for the *kinds of cleaning* we apply (auto-fixes).
@@ -90,6 +109,8 @@ FIX_LABELS = {
     "standardized_category": "Standardized value",
     "normalized_language": "Standardized language",
     "normalized_percent": "Standardized percentage",
+    "titlecased": "Standardized name casing",
+    "combined_columns": "Merged from multiple columns",
 }
 
 # Default fix category per field type (overridden by "removed_junk" when a
@@ -105,7 +126,8 @@ _FIX_TAG_BY_TYPE = {
     "code": "normalized_code",
     "path": "normalized_path",
     "text": "trimmed",
-    "name": "trimmed",
+    "name": "titlecased",
+    "title": "titlecased",
     "category": "trimmed",
     "serial": "trimmed",
 }
@@ -130,12 +152,53 @@ def _is_placeholder(text: str) -> bool:
     return all(not ch.isalnum() for ch in t)
 
 
-def _gtin_check_digit_ok(digits: str) -> bool:
-    """Validate the GTIN/EAN-13/UPC-A check digit (the last digit)."""
-    nums = [int(c) for c in digits]
-    body = nums[:-1][::-1]
-    total = sum(d * (3 if i % 2 == 0 else 1) for i, d in enumerate(body))
-    return (10 - total % 10) % 10 == nums[-1]
+def _is_garbled(raw: str) -> bool:
+    """True for control-escape / mojibake blobs like "`$/`$>`$0 `$`%".
+
+    Tested against the *raw* cell (before normalization strips the markers).
+    """
+    if not raw:
+        return False
+    if _ESCAPE.search(raw):              # leftover _xNNNN_ control escapes
+        return True
+    if raw.count("$") >= 2:              # repeated $ markers
+        return True
+    if "`" in raw and "$" in raw:        # backtick + dollar combos
+        return True
+    return False
+
+
+def _titlecase(text: str) -> str:
+    """Standardize casing to 'Demo Name' form (per-word capitalization).
+
+    str.title() handles word boundaries around spaces, hyphens and apostrophes
+    (e.g. "JOHN o'brien-smith" -> "John O'Brien-Smith").
+    """
+    return text.title()
+
+
+def _name_problem(name: str) -> tuple[str, str] | None:
+    """Return (tag, message) if a single name/title looks wrong, else None.
+
+    Flags suspect symbols ($, %, ...), all-caps single words (DEMO), and mangled
+    casing such as camelCase smash-ups (DemoName) or initials run together (DName).
+    """
+    if any(ch in _SUSPECT_CHARS for ch in name):
+        return ("suspect_value", "Contains unexpected symbols — please check.")
+    tokens = name.split()
+    if not tokens:
+        return None
+    # A single token with irregular casing is almost always bad data.
+    if len(tokens) == 1:
+        t = tokens[0]
+        letters = [c for c in t if c.isalpha()]
+        if len(letters) >= 2 and all(c.isupper() for c in letters):
+            return ("suspect_value", "All-caps single word — confirm the real name.")
+    for t in tokens:
+        # lower->Upper ("DemoName") or RUN-together capitals + lower ("DName").
+        if re.search(r"[a-z][A-Z]", t) or re.search(r"[A-Z]{2,}[a-z]", t):
+            return ("suspect_value", "Unusual capitalization — confirm the real name.")
+    return None
 
 
 # Plausible calendar-date window for this dataset.
@@ -151,7 +214,7 @@ _DATE_FORMATS = [
 # Field types whose only possible "fix" is cosmetic normalization (whitespace,
 # unicode, case, slash direction). A change here doesn't mean the data was wrong,
 # just tidied — so it shouldn't light up the health map as a real correction.
-COSMETIC_TYPES = {"text", "name", "category", "language", "serial", "path"}
+COSMETIC_TYPES = {"text", "category", "language", "serial", "path"}
 
 
 @dataclass
@@ -211,12 +274,61 @@ def _clean_text(value) -> Cell:
 
 
 def _clean_name(value) -> Cell:
-    cell = _clean_text(value)
-    # A "name" that is purely a number (or one stray character) isn't a name.
-    if cell.value and (cell.value.isdigit() or len(cell.value) == 1):
-        return Cell(cell.value, "error", "suspect_value",
-                    "This doesn't look like a name.", cell.original)
-    return cell
+    """Clean a person-name field that may hold one or many names.
+
+    Multiple names in one cell (separated by comma or pipe) are split, each is
+    Title-cased and shape-checked, then re-joined with ' | '. Any name that looks
+    wrong (suspect symbols, mangled casing, garbled blob, bare number) flags the
+    whole cell for review.
+    """
+    raw = "" if value is None else str(value)
+    base = _base_text(value)
+    gate = _blank_or_junk(raw, base)
+    if gate:
+        return gate
+    if _is_garbled(raw):
+        return Cell(base, "error", "garbled_value",
+                    "This value looks corrupted — please check.", raw)
+
+    names: list[str] = []
+    problem: tuple[str, str] | None = None
+    for part in _NAME_SPLIT.split(base):
+        part = part.strip()
+        if not part:
+            continue
+        names.append(_titlecase(part))
+        # Shape-check the ORIGINAL casing (Title-casing would hide DemoName/DEMO).
+        if problem is None:
+            if part.isdigit() or len(part) == 1:
+                problem = ("suspect_value", "This doesn't look like a name.")
+            else:
+                problem = _name_problem(part)
+
+    out = NAME_SEP.join(dict.fromkeys(names))  # de-dupe, keep order
+    if problem:
+        return Cell(out, "error", problem[0], problem[1], raw)
+    return Cell(out, "fixed" if out != raw else "ok", original=raw)
+
+
+def _clean_title(value) -> Cell:
+    """Clean an album / track title: Title-case, flag suspect symbols / casing.
+
+    Unlike names, titles are NOT split on commas (a title may contain one).
+    """
+    raw = "" if value is None else str(value)
+    base = _base_text(value)
+    gate = _blank_or_junk(raw, base)
+    if gate:
+        return gate
+    if _is_garbled(raw):
+        return Cell(base, "error", "garbled_value",
+                    "This value looks corrupted — please check.", raw)
+    # Shape-check the ORIGINAL casing before Title-casing hides it.
+    problem = _name_problem(base)
+    fixed = _titlecase(base)
+    if problem:
+        return Cell(fixed, "error", problem[0], problem[1], raw)
+    return Cell(fixed, "fixed" if fixed != raw else "ok", original=raw)
 
 
 def _clean_path(value) -> Cell:
@@ -245,12 +357,18 @@ def _clean_isrc(value) -> Cell:
     if gate:
         return gate
     s = base.upper().replace("-", "").replace(" ", "")
-    if _ISRC.match(s):
-        return Cell(s, "fixed" if s != raw else "ok", original=raw)
-    return Cell(
-        s, "error", "invalid_isrc",
-        "Not a valid 12-character ISRC (e.g. INA011900001).", raw,
-    )
+    # Rule: an ISRC must be exactly 12 characters. Anything else -> human review.
+    if len(s) != 12:
+        return Cell(
+            s, "error", "invalid_isrc",
+            f"ISRC must be exactly 12 characters (got {len(s)}).", raw,
+        )
+    if not _ISRC.match(s):
+        return Cell(
+            s, "error", "invalid_isrc",
+            "Not a valid ISRC format (e.g. INA011900001).", raw,
+        )
+    return Cell(s, "fixed" if s != raw else "ok", original=raw)
 
 
 def _clean_upc(value) -> Cell:
@@ -260,15 +378,11 @@ def _clean_upc(value) -> Cell:
     if gate:
         return gate
     digits = re.sub(r"\D", "", base)
+    # Rule: a UPC/EAN must be 12 or 13 digits. Anything else -> human review.
     if len(digits) not in (12, 13):
         return Cell(
             digits, "error", "invalid_upc",
             f"UPC/EAN must be 12 or 13 digits (got {len(digits)}).", raw,
-        )
-    if not _gtin_check_digit_ok(digits):
-        return Cell(
-            digits, "error", "invalid_upc",
-            "Barcode check digit doesn't match — likely a typo.", raw,
         )
     return Cell(digits, "fixed" if digits != raw else "ok", original=raw)
 
@@ -324,7 +438,8 @@ def _clean_duration(value) -> Cell:
     if value in (None, ""):
         return Cell("", "ok", original=raw)
 
-    bad = Cell(raw, "error", "invalid_duration", "Duration must look like mm:ss.", raw)
+    bad = Cell(raw, "error", "invalid_duration",
+               "Duration must look like hh:mm:ss.", raw)
     if isinstance(value, dt.time):
         total = value.hour * 3600 + value.minute * 60 + value.second
     else:
@@ -355,11 +470,12 @@ def _clean_duration(value) -> Cell:
             return bad
 
     if total == 0:
-        return Cell("00:00", "error", "invalid_duration", "Zero-length duration.", raw)
+        return Cell("00:00:00", "error", "invalid_duration", "Zero-length duration.", raw)
     if total > _MAX_DURATION:
         return Cell(raw, "error", "invalid_duration", "Duration is implausibly long.", raw)
-    mm, ss = divmod(total, 60)
-    out = f"{mm:02d}:{ss:02d}"
+    hh, rem = divmod(total, 3600)
+    mm, ss = divmod(rem, 60)
+    out = f"{hh:02d}:{mm:02d}:{ss:02d}"  # standardized hh:mm:ss
     return Cell(out, "fixed" if out != raw else "ok", original=raw)
 
 
@@ -432,8 +548,8 @@ def _clean_percent(value) -> Cell:
 
 
 _CLEANERS = {
-    "text": _clean_text, "name": _clean_name, "path": _clean_path,
-    "code": _clean_code, "isrc": _clean_isrc, "upc": _clean_upc,
+    "text": _clean_text, "name": _clean_name, "title": _clean_title,
+    "path": _clean_path, "code": _clean_code, "isrc": _clean_isrc, "upc": _clean_upc,
     "date": _clean_date, "duration": _clean_duration,
     "vocal_instrumental": _clean_vocal, "language": _clean_language,
     "category": _clean_category, "serial": _clean_serial, "percent": _clean_percent,
@@ -444,6 +560,13 @@ def clean_cell(master_column: str, value) -> Cell:
     ftype = FIELD_TYPES.get(master_column, "text")
     cleaner = _CLEANERS.get(ftype, _clean_text)
     cell = cleaner(value)
+    # Universal safety net: any field whose raw value is a corrupted control-char
+    # blob ("`$/`$>`$0 `$`%") goes to human review, whatever its type.
+    if cell.action != "error":
+        raw = "" if value is None else str(value)
+        if _is_garbled(raw):
+            return Cell(cell.value, "error", "garbled_value",
+                        "This value looks corrupted — please check.", raw)
     if cell.action == "fixed":
         # Clearing real junk (a non-empty value reduced to blank) is a meaningful
         # correction; whitespace/case/unicode tidy-ups are cosmetic.
@@ -454,6 +577,38 @@ def clean_cell(master_column: str, value) -> Cell:
         if cell.tag is None:
             cell.tag = "removed_junk" if emptied else _FIX_TAG_BY_TYPE.get(ftype, "trimmed")
     return cell
+
+
+def clean_value(master_column: str, raws: list) -> Cell:
+    """Clean one master cell that may be fed by several input columns.
+
+    Each source is cleaned independently, then merged into a single pipe-separated
+    value (e.g. Singer 1 / Singer 2 / Singer 3 -> "A | B | C"). The merged cell is
+    an error if ANY source errored; the worst error's tag/message is surfaced.
+    """
+    cells = [clean_cell(master_column, r) for r in raws]
+    nonblank = [c for c in cells if c.value != ""]
+    if len(cells) <= 1:
+        return cells[0] if cells else Cell("", "ok", original="")
+    if len(nonblank) <= 1:
+        # Effectively single-valued — return that cell (or a clean blank).
+        return nonblank[0] if nonblank else Cell("", "ok", original="")
+
+    # Merge the individual values, splitting any that are themselves multi-name,
+    # then de-duplicating while preserving order.
+    parts: list[str] = []
+    for c in nonblank:
+        for piece in c.value.split(NAME_SEP):
+            piece = piece.strip()
+            if piece and piece not in parts:
+                parts.append(piece)
+    merged = NAME_SEP.join(parts)
+    original = NAME_SEP.join(str(r) for r in raws if r not in (None, ""))
+
+    err = next((c for c in cells if c.action == "error"), None)
+    if err is not None:
+        return Cell(merged, "error", err.tag, err.message, original)
+    return Cell(merged, "fixed", tag="combined_columns", original=original)
 
 
 def clean_dataset(
@@ -478,9 +633,13 @@ def clean_dataset(
         issues: list[dict] = []
         for m in active:
             master = m["master_column"]
-            src = header_index.get(m["input_header"])
-            raw = row[src] if src is not None and src < len(row) else None
-            cell = clean_cell(master, raw)
+            # Gather every input column feeding this master (primary + extras).
+            sources = [m["input_header"], *(m.get("extra_headers") or [])]
+            raws = []
+            for h in sources:
+                src = header_index.get(h)
+                raws.append(row[src] if src is not None and src < len(row) else None)
+            cell = clean_value(master, raws)
             values[master] = cell.value
 
             if cell.action == "error":
@@ -501,27 +660,167 @@ def clean_dataset(
     return results
 
 
-def mark_duplicates(rows: list[CleanRow]) -> None:
-    """Flag rows that repeat an ISRC seen earlier in the dataset (in place).
+# Identity fields compared when judging whether two rows are the same record.
+# Only those actually present in the mapped output participate; duration, genre
+# and any other column are intentionally ignored.
+#
+# ISRC is the unique key of a *recording* (a song): two rows with different ISRCs
+# are different songs and are never duplicates — even when they share a UPC, which
+# is the *album/release* barcode that every track on an album has in common.
+DEDUP_FIELDS = [
+    "ISRC", "UPC", "Label", "Album Name", "Track Name", "Singer", "Composer",
+    "Lyricist", "Publisher", "Music Producer", "Language",
+]
 
-    Run as a cross-row pass over the *final* values so it stays correct after
-    human edits/bulk fixes. The first occurrence of each ISRC is kept clean.
+
+def _dedup_norm(v: str | None) -> str:
+    return re.sub(r"\s+", " ", (v or "").strip()).lower()
+
+
+def _has_real_error(r: CleanRow) -> bool:
+    """A genuine cleaning error (not a duplicate flag) — explains a field mismatch."""
+    return any(
+        i["action"] == "error"
+        and i.get("tag") not in ("duplicate", "possible_duplicate")
+        for i in r.issues
+    )
+
+
+def mark_duplicates(rows: list[CleanRow]) -> None:
+    """Flag duplicate / possible-duplicate records (in place), keyed on ISRC.
+
+    The ISRC uniquely identifies a recording, so de-duplication groups rows by
+    ISRC. Different ISRC -> different song -> never a duplicate (this is why two
+    tracks of the same album, which share a UPC but have different ISRCs and song
+    names, are NOT flagged). Within one ISRC:
+
+      * EXACT duplicate    — every compared identity field is identical -> tagged
+        `duplicate`; the first occurrence is kept, the rest excluded from master.
+      * POSSIBLE duplicate — same ISRC (same recording) but some metadata differs
+        -> tagged `possible_duplicate`, listing the colliding row(s) and which
+        fields differ, so a human can compare and confirm.
+
+    Rows with a blank ISRC are skipped here (they already carry a missing-required
+    error). Runs over the *final* values so it stays correct after human edits.
     """
-    seen: dict[str, int] = {}
+    # Drop any stale cross-row flags from a previous pass.
+    _cross = ("duplicate", "possible_duplicate", "upc_album_mismatch")
     for r in rows:
-        # Drop any stale duplicate flag from a previous pass before re-checking.
-        r.issues = [i for i in r.issues if i.get("tag") != "duplicate"]
-        isrc_val = r.values.get("ISRC")
-        if not isrc_val:
+        r.issues = [i for i in r.issues if i.get("tag") not in _cross]
+
+    # Only the identity fields that are actually mapped take part.
+    fields = [f for f in DEDUP_FIELDS if any(f in r.values for r in rows)]
+    is_exact: set[int] = set()
+
+    if "ISRC" in fields:  # without ISRC we can't tell same song from same album
+        def sig(r: CleanRow) -> tuple[str, ...]:
+            return tuple(_dedup_norm(r.values.get(f)) for f in fields)
+
+        # Group rows by their (normalized) ISRC — the recording's unique key.
+        by_isrc: dict[str, list[CleanRow]] = {}
+        for r in rows:
+            isrc = _dedup_norm(r.values.get("ISRC"))
+            if isrc:
+                by_isrc.setdefault(isrc, []).append(r)
+
+        for group in by_isrc.values():
+            if len(group) < 2:
+                continue  # unique ISRC -> a distinct song, nothing to flag
+
+            # Exact duplicates: identical across every compared field. Keep the
+            # first occurrence; tag the later identical rows for removal.
+            first_for_sig: dict[tuple[str, ...], int] = {}
+            for r in group:
+                s = sig(r)
+                if s in first_for_sig:
+                    is_exact.add(r.index)
+                    r.issues.append({
+                        "column": "ISRC", "action": "error", "tag": "duplicate",
+                        "message": f"Exact duplicate of row {first_for_sig[s] + 1}.",
+                        "value": "", "original": "",
+                    })
+                else:
+                    first_for_sig[s] = r.index
+
+            # No metadata conflict (all rows identical) -> only exact dups, done.
+            if len(first_for_sig) < 2:
+                continue
+
+            # Same ISRC but the rows disagree on some field(s): a possible dup.
+            # List the distinct (non-exact) rows as each other's collision
+            # partners, and report exactly which identity fields differ.
+            reps = [r for r in group if r.index not in is_exact]
+            differing = [
+                f for f in fields
+                if len({_dedup_norm(r.values.get(f)) for r in reps}) > 1
+            ]
+            for r in reps:
+                # A real cleaning error already sends this row to review and
+                # explains the mismatch -> don't pile on a duplicate flag.
+                if _has_real_error(r):
+                    continue
+                partners = [o.index + 1 for o in reps if o is not r]
+                r.issues.append({
+                    "column": "ISRC", "action": "error", "tag": "possible_duplicate",
+                    "message": (
+                        f"Same ISRC as row {', '.join(map(str, partners))} but "
+                        f"{', '.join(differing)} differ{'s' if len(differing) == 1 else ''}. "
+                        f"Compare and confirm it isn't a duplicate."
+                    ),
+                    "value": r.values.get("ISRC", ""),
+                    "original": "",
+                    "related_rows": partners,
+                })
+
+    # UPC <-> Album Name must agree: one album/release has exactly one barcode.
+    # Same UPC with different Album Names (or same Album with different UPCs) is a
+    # data inconsistency a human should resolve.
+    if "UPC" in fields and "Album Name" in fields:
+        _flag_field_conflict(rows, "UPC", "Album Name", is_exact,
+                             "shares UPC but the Album Name differs")
+        _flag_field_conflict(rows, "Album Name", "UPC", is_exact,
+                             "shares Album Name but the UPC differs")
+
+
+def _flag_field_conflict(
+    rows: list[CleanRow], key: str, other: str, skip: set[int], reason: str
+) -> None:
+    """Flag rows where `key` matches across rows but `other` disagrees.
+
+    Used for the UPC<->Album rule: a shared UPC must carry one Album Name (and a
+    shared Album Name one UPC). Conflicts are tagged `upc_album_mismatch`.
+    """
+    groups: dict[str, list[CleanRow]] = {}
+    for r in rows:
+        if r.index in skip:
             continue
-        if isrc_val in seen:
+        k = _dedup_norm(r.values.get(key))
+        ov = _dedup_norm(r.values.get(other))
+        if k and ov:  # both sides must be present to compare
+            groups.setdefault(k, []).append(r)
+
+    for group in groups.values():
+        if len({_dedup_norm(r.values.get(other)) for r in group}) < 2:
+            continue  # the `other` value is consistent -> fine
+        for r in group:
+            if _has_real_error(r):
+                continue
+            if any(
+                i.get("tag") == "upc_album_mismatch" and i.get("column") == other
+                for i in r.issues
+            ):
+                continue
+            partners = [p.index + 1 for p in group if p is not r]
             r.issues.append({
-                "column": "ISRC", "action": "error", "tag": "duplicate",
-                "message": f"Duplicate ISRC (also in row {seen[isrc_val] + 1}).",
-                "value": isrc_val, "original": isrc_val,
+                "column": other, "action": "error", "tag": "upc_album_mismatch",
+                "message": (
+                    f"Row {', '.join(map(str, partners))} {reason} "
+                    f"(got “{r.values.get(other, '')}”). Please reconcile."
+                ),
+                "value": r.values.get(other, ""),
+                "original": "",
+                "related_rows": partners,
             })
-        else:
-            seen[isrc_val] = r.index
 
 
 def revalidate(values: dict[str, str]) -> tuple[dict[str, str], list[dict]]:

@@ -61,7 +61,11 @@ export default function Login() {
         </div>
         <div className="auth-aside-inner">
           <div className="auth-brand">
-            <span className="brand-mark">MRM</span> Cleanser
+            <img
+              src="/logo.png"
+              alt="MRM Cleanser"
+              className="brand-logo brand-logo-chip"
+            />
           </div>
           <h1 className="auth-hero">
             Turn messy vendor sheets into <em>spotless</em> master data.
@@ -91,7 +95,7 @@ export default function Login() {
       <main className="auth-panel">
         <form className="auth-form" onSubmit={handleSubmit}>
           <div className="auth-brand auth-brand-sm">
-            <span className="brand-mark">MRM</span> Cleanser
+            <img src="/logo.png" alt="MRM Cleanser" className="brand-logo" />
           </div>
 
           <div className="auth-head">

@@ -1,29 +1,37 @@
-:root {
+/* ============================================================
+   Theme palette — greens from the brand:
+   #EEEEEE  light surface/bg   #6FCF97  light green
+   #2FA084  primary green      #1F6F5F  deep green
+   The light values live in :root (and are re-applied by .theme-light so the
+   Review screen stays light even in dark mode). Dark overrides live below.
+   ============================================================ */
+:root,
+.theme-light {
   /* Brand */
-  --brand: #4f46e5;
-  --brand-600: #4338ca;
-  --brand-700: #3730a3;
-  --brand-50: #eef2ff;
-  --brand-100: #e0e7ff;
-  --accent: #7c3aed;
-  --accent-2: #0ea5e9;
-  --brand-gradient: linear-gradient(135deg, #4f46e5 0%, #7c3aed 55%, #6366f1 100%);
-  --brand-gradient-soft: linear-gradient(135deg, #6366f1, #8b5cf6);
+  --brand: #2fa084;
+  --brand-600: #1f6f5f;
+  --brand-700: #18564a;
+  --brand-50: #e9f7f1;
+  --brand-100: #cdeee2;
+  --accent: #2fa084;
+  --accent-2: #6fcf97;
+  --brand-gradient: linear-gradient(135deg, #2fa084 0%, #6fcf97 55%, #1f6f5f 100%);
+  --brand-gradient-soft: linear-gradient(135deg, #6fcf97, #2fa084);
 
   /* Neutrals */
-  --bg: #f4f5fb;
+  --bg: #eeeeee;
   --surface: #ffffff;
-  --surface-2: #f7f8fc;
+  --surface-2: #f4f6f5;
   --surface-glass: rgba(255, 255, 255, 0.72);
-  --border: #e7e9f2;
-  --border-strong: #d3d7e6;
-  --text: #161922;
-  --muted: #646b7d;
-  --muted-2: #9aa1b3;
+  --border: #e1e5e3;
+  --border-strong: #ccd4d0;
+  --text: #14201c;
+  --muted: #586a64;
+  --muted-2: #93a09b;
 
   /* Status */
-  --green: #15a34a;
-  --green-bg: #ecfdf3;
+  --green: #2fa084;
+  --green-bg: #e7f6f0;
   --amber: #e08600;
   --amber-bg: #fff8eb;
   --red: #e0383b;
@@ -36,10 +44,66 @@
   --radius-lg: 20px;
   --radius: 14px;
   --radius-sm: 10px;
-  --shadow-sm: 0 1px 2px rgba(20, 24, 50, 0.05);
-  --shadow: 0 6px 22px -6px rgba(28, 32, 70, 0.14);
-  --shadow-lg: 0 24px 60px -16px rgba(28, 32, 70, 0.28);
+  --shadow-sm: 0 1px 2px rgba(20, 40, 34, 0.05);
+  --shadow: 0 6px 22px -6px rgba(18, 40, 34, 0.14);
+  --shadow-lg: 0 24px 60px -16px rgba(18, 40, 34, 0.28);
+  --hero-grad: linear-gradient(135deg, #ffffff, var(--brand-50));
   --ring: 0 0 0 3px var(--brand-100);
+}
+
+/* ---- Dark mode: deep-green tones (never pure black), light readable text ---- */
+:root[data-theme="dark"] {
+  --brand: #6fcf97;
+  --brand-600: #2fa084;
+  --brand-700: #6fcf97;
+  --brand-50: #16352d;
+  --brand-100: #1d473c;
+  --accent: #6fcf97;
+  --accent-2: #2fa084;
+  --brand-gradient: linear-gradient(135deg, #2fa084 0%, #6fcf97 60%, #1f6f5f 100%);
+  --brand-gradient-soft: linear-gradient(135deg, #2fa084, #6fcf97);
+
+  /* Neutrals — darkened from the deep brand green (#1F6F5F), not black */
+  --bg: #0e201c;
+  --surface: #15302a;
+  --surface-2: #193a32;
+  --surface-glass: rgba(15, 36, 31, 0.75);
+  --border: #2a5249;
+  --border-strong: #356a5d;
+  --text: #eeeeee;
+  --muted: #a9c2ba;
+  --muted-2: #7c958c;
+
+  --green: #6fcf97;
+  --green-bg: #143229;
+  --amber: #f0b24a;
+  --amber-bg: #3a2f17;
+  --red: #f28e90;
+  --red-bg: #3a2122;
+  --blue: #84b2f6;
+  --blue-bg: #18283f;
+  --purple: #b79af0;
+  --purple-bg: #272042;
+
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.45);
+  --shadow: 0 8px 24px -8px rgba(0, 0, 0, 0.6);
+  --shadow-lg: 0 24px 60px -16px rgba(0, 0, 0, 0.75);
+  --hero-grad: linear-gradient(135deg, var(--surface-2), var(--brand-50));
+  --ring: 0 0 0 3px rgba(111, 207, 151, 0.35);
+}
+
+/* The Review screen always stays light, even when the app is in dark mode. */
+.theme-light {
+  background: var(--bg);
+  color: var(--text);
+}
+/* In dark mode, frame the (light) review panel so it reads as an intentional
+   white sheet floating on the dark app shell. */
+:root[data-theme="dark"] .review-page {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 1.5rem 1.75rem 2rem;
+  box-shadow: var(--shadow-lg);
 }
 
 @keyframes rise {
@@ -61,14 +125,20 @@ body {
   font-family: "Inter", ui-sans-serif, system-ui, -apple-system, sans-serif;
   background-color: var(--bg);
   background-image:
-    radial-gradient(900px 520px at 12% -8%, rgba(124, 58, 237, 0.10), transparent 60%),
-    radial-gradient(900px 520px at 100% 0%, rgba(14, 165, 233, 0.08), transparent 55%),
-    radial-gradient(700px 600px at 50% 120%, rgba(79, 70, 229, 0.06), transparent 60%);
+    radial-gradient(900px 520px at 12% -8%, rgba(47, 160, 132, 0.12), transparent 60%),
+    radial-gradient(900px 520px at 100% 0%, rgba(111, 207, 151, 0.10), transparent 55%),
+    radial-gradient(700px 600px at 50% 120%, rgba(31, 111, 95, 0.08), transparent 60%);
   background-attachment: fixed;
   color: var(--text);
   -webkit-font-smoothing: antialiased;
   font-feature-settings: "cv11", "ss01";
   line-height: 1.5;
+}
+:root[data-theme="dark"] body {
+  background-image:
+    radial-gradient(900px 520px at 12% -8%, rgba(47, 160, 132, 0.18), transparent 60%),
+    radial-gradient(900px 520px at 100% 0%, rgba(111, 207, 151, 0.10), transparent 55%),
+    radial-gradient(700px 600px at 50% 120%, rgba(31, 111, 95, 0.22), transparent 60%);
 }
 
 a {
@@ -507,6 +577,20 @@ input::placeholder {
   font-size: 1.05rem;
   letter-spacing: -0.02em;
 }
+.brand-logo {
+  height: 40px;
+  width: auto;
+  display: block;
+}
+/* Logo on a coloured surface (the login aside) — sits on a white chip so the
+   green wordmark stays legible. */
+.brand-logo-chip {
+  height: 54px;
+  padding: 0.5rem 0.85rem;
+  background: #fff;
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-sm);
+}
 .nav {
   display: flex;
   gap: 0.25rem;
@@ -564,10 +648,15 @@ input::placeholder {
   font-weight: 600;
 }
 .content {
-  max-width: 1080px;
+  max-width: 1280px;
   margin: 0 auto;
   padding: 2.25rem 1.75rem 4rem;
   animation: rise 0.4s cubic-bezier(0.22, 1, 0.36, 1);
+}
+/* The review/workspace screen is data-dense — let it use the full screen width
+   so the grid shows more columns with less horizontal scrolling. */
+.content.content-wide {
+  max-width: min(1760px, calc(100vw - 3rem));
 }
 
 /* ---------- Page header ---------- */
@@ -1144,7 +1233,7 @@ input::placeholder {
   padding: 1.5rem;
   margin-bottom: 1.5rem;
   border-radius: var(--radius);
-  background: linear-gradient(135deg, #ffffff, var(--brand-50));
+  background: var(--hero-grad);
   border: 1px solid var(--border);
   box-shadow: var(--shadow-sm);
 }
@@ -1278,6 +1367,54 @@ input::placeholder {
   color: var(--red);
   font-size: 0.76rem;
   margin-top: 0.3rem;
+}
+.map-row .master {
+  align-self: start;
+  padding-top: 0.4rem;
+}
+.extra-source {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-top: 0.4rem;
+}
+.extra-source select {
+  flex: 1;
+}
+.extra-source .extra-plus {
+  color: var(--muted-2);
+  font-weight: 700;
+}
+.extra-remove {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border);
+  background: var(--surface, #fff);
+  color: var(--muted);
+  border-radius: 6px;
+  padding: 0.25rem;
+  cursor: pointer;
+}
+.extra-remove:hover {
+  color: var(--red);
+  border-color: var(--red);
+}
+.extra-add {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  margin-top: 0.4rem;
+  background: none;
+  border: none;
+  color: var(--accent, #4f46e5);
+  font-size: 0.78rem;
+  font-weight: 600;
+  cursor: pointer;
+  padding: 0.15rem 0;
+}
+.extra-add:hover {
+  text-decoration: underline;
 }
 
 .method-badge {
@@ -1670,17 +1807,17 @@ input::placeholder {
 .grid-table {
   border-collapse: separate;
   border-spacing: 0;
-  font-size: 0.82rem;
+  font-size: 0.95rem;
   white-space: nowrap;
   width: max-content;
   min-width: 100%;
 }
 .grid-table th,
 .grid-table td {
-  padding: 0.62rem 0.95rem;
+  padding: 0.72rem 1.15rem;
   border-bottom: 1px solid var(--border);
   text-align: left;
-  max-width: 240px;
+  max-width: 320px;
   overflow: hidden;
   text-overflow: ellipsis;
   vertical-align: middle;
@@ -1690,7 +1827,7 @@ input::placeholder {
   background: var(--surface);
   color: var(--muted);
   font-weight: 700;
-  font-size: 0.72rem;
+  font-size: 0.8rem;
   text-transform: uppercase;
   letter-spacing: 0.04em;
   position: sticky;
@@ -1769,7 +1906,7 @@ input::placeholder {
 .cell-fix-tag {
   display: block;
   margin-top: 0.2rem;
-  font-size: 0.62rem;
+  font-size: 0.68rem;
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.02em;
@@ -1822,11 +1959,11 @@ input::placeholder {
 }
 .grid-table td.cell-flagged input {
   width: 100%;
-  min-width: 140px;
+  min-width: 150px;
   border: 1px solid color-mix(in srgb, var(--tag) 55%, var(--border-strong));
   border-radius: 7px;
-  padding: 0.35rem 0.45rem;
-  font-size: 0.82rem;
+  padding: 0.4rem 0.5rem;
+  font-size: 0.95rem;
   background: #fff;
   color: var(--text);
 }
@@ -1838,11 +1975,16 @@ input::placeholder {
 .cell-tag {
   display: block;
   margin-top: 0.22rem;
-  font-size: 0.66rem;
+  font-size: 0.72rem;
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.02em;
   color: var(--tag);
+}
+.cell-tag-rows {
+  font-style: normal;
+  font-weight: 800;
+  text-decoration: underline;
 }
 .grid-empty {
   text-align: center !important;

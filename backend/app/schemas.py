@@ -70,6 +70,10 @@ class MappingItem(BaseModel):
     master_column: str
     position: int
     input_header: str | None
+    # Additional input columns feeding the SAME master column. When present, all
+    # sources are merged into one value during cleaning (pipe-separated for names
+    # like Singer 1 / Singer 2 / Singer 3 -> Singer).
+    extra_headers: list[str] = []
     confidence: float
     method: str  # exact | synonym | fuzzy | unmatched | manual
     needs_review: bool
@@ -101,9 +105,15 @@ class WorkspaceOut(BaseModel):
 
 
 class MappingUpdate(BaseModel):
-    """User-confirmed mapping: master column name -> chosen input header (or null)."""
+    """User-confirmed mapping.
+
+    `assignments` is the primary input header per master column (or null).
+    `extra` holds any additional input columns feeding the same master column,
+    so several input columns can be directed into one master column.
+    """
 
     assignments: dict[str, str | None]
+    extra: dict[str, list[str]] = {}
 
 
 class PreviewOut(BaseModel):

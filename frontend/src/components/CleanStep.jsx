@@ -12,12 +12,12 @@ export default function CleanStep({ file, onCleaned, onReview }) {
   async function run() {
     setError("");
     setBusy(true);
-    setProgress(6);
-    // The clean runs in a single request; ease a progress bar toward ~92% while
+    setProgress(18);
+    // The clean is a single fast request; fill the bar quickly toward ~95% while
     // we wait, then snap to 100% the moment results come back.
     const timer = setInterval(
-      () => setProgress((p) => (p < 92 ? p + Math.max(1, (92 - p) * 0.12) : p)),
-      280
+      () => setProgress((p) => (p < 95 ? p + Math.max(3, (95 - p) * 0.3) : p)),
+      90
     );
     try {
       const s = await api(`/api/files/${file.id}/clean`, { method: "POST" });

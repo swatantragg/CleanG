@@ -166,15 +166,22 @@ def preview_output(
 
     header_index = {h: i for i, h in enumerate(f.headers)}
     master_cols = [m["master_column"] for m in f.mapping]
-    source_index = [
-        header_index.get(m["input_header"]) if m["input_header"] else None
+    # Each master column may pull from one or several input columns (primary +
+    # extras). Pre-resolve the source indexes once per column.
+    source_indexes = [
+        [
+            header_index[h]
+            for h in ([m.get("input_header")] + (m.get("extra_headers") or []))
+            if h and h in header_index
+        ]
         for m in f.mapping
     ]
 
-    out_rows = [
-        [(r[idx] if idx is not None and idx < len(r) else "") for idx in source_index]
-        for r in f.data[:rows]
-    ]
+    def _cell(r, idxs):
+        vals = [str(r[i]) for i in idxs if i < len(r) and str(r[i]).strip()]
+        return " | ".join(dict.fromkeys(vals)) if vals else ""
+
+    out_rows = [[_cell(r, idxs) for idxs in source_indexes] for r in f.data[:rows]]
     return PreviewOut(columns=master_cols, rows=out_rows, total_rows=f.n_rows)
 
 
@@ -189,19 +196,33 @@ def update_mapping(
     f = _get_file_or_404(file_id, user, db)
     valid_headers = set(f.headers)
 
+    def _check(header: str | None) -> None:
+        if header is not None and header not in valid_headers:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                f"'{header}' is not a header in this file.",
+            )
+
     new_mapping = []
     for item in f.mapping:
         master = item["master_column"]
-        if master in payload.assignments:
-            chosen = payload.assignments[master]
-            if chosen is not None and chosen not in valid_headers:
-                raise HTTPException(
-                    status.HTTP_422_UNPROCESSABLE_ENTITY,
-                    f"'{chosen}' is not a header in this file.",
-                )
+        touched = master in payload.assignments or master in payload.extra
+        if touched:
+            chosen = payload.assignments.get(master, item.get("input_header"))
+            _check(chosen)
+            # Extra sources: validate, drop blanks/the primary, de-duplicate.
+            extras: list[str] = []
+            for h in payload.extra.get(master, []):
+                _check(h)
+                if h and h != chosen and h not in extras:
+                    extras.append(h)
+            # If no primary was chosen but extras exist, promote the first extra.
+            if not chosen and extras:
+                chosen = extras.pop(0)
             item = {
                 **item,
                 "input_header": chosen,
+                "extra_headers": extras,
                 "method": "manual" if chosen else "unmatched",
                 "confidence": 1.0 if chosen else 0.0,
                 "needs_review": False,

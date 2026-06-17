@@ -16,7 +16,7 @@ two sheets up, but in milliseconds.
 
 import datetime as dt
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from difflib import SequenceMatcher
 
 from .cleaning import FIELD_TYPES
@@ -47,6 +47,7 @@ class Suggestion:
     confidence: float
     method: str  # exact | synonym | fuzzy | content | unmatched
     needs_review: bool
+    extra_headers: list[str] = field(default_factory=list)
 
 
 # --------------------------------------------------------------------------
@@ -232,6 +233,19 @@ def suggest_mapping(
         used_inputs.add(i)
         used_masters.add(m)
 
+    # Multi-source auto-grouping: leftover input columns that clearly belong to an
+    # already-mapped master become *extra* sources for it. This collects numbered
+    # variants like "Singer 1 / Singer 2 / Singer 3" -> Singer automatically, so
+    # several input columns can be directed into one master column.
+    extras: dict[int, list[int]] = {m: [] for m in assigned}
+    for score, i, m, method in scored:
+        if i in used_inputs or m not in assigned:
+            continue
+        if score < REVIEW_THRESHOLD:  # only confident extras are auto-grouped
+            continue
+        extras[m].append(i)
+        used_inputs.add(i)
+
     suggestions: list[Suggestion] = []
     for m, mc in enumerate(master_columns):
         if m in assigned:
@@ -244,6 +258,7 @@ def suggest_mapping(
                     confidence=score,
                     method=method,
                     needs_review=(score < REVIEW_THRESHOLD),
+                    extra_headers=[input_headers[j] for j in extras.get(m, [])],
                 )
             )
         else:

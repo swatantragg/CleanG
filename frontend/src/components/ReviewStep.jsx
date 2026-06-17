@@ -17,7 +17,10 @@ const TAG_COLORS = {
   invalid_category: "#2563eb",
   suspect_value: "#db2777",
   missing_required: "#dc2626",
+  garbled_value: "#9333ea",
   duplicate: "#0d9488",
+  possible_duplicate: "#14b8a6",
+  upc_album_mismatch: "#f59e0b",
   // Cleaning (auto-fix) categories — calm green/teal hues.
   trimmed: "#16a34a",
   removed_junk: "#0d9488",
@@ -231,7 +234,7 @@ export default function ReviewStep({ file, onCommitted }) {
   const errorsLeft = summary?.errors ?? 0;
 
   return (
-    <div>
+    <div className="theme-light review-page">
       <div className="page-head">
         <div>
           <h1>Review &amp; save</h1>
@@ -486,6 +489,12 @@ export default function ReviewStep({ file, onCommitted }) {
                               />
                               <span className="cell-tag">
                                 {tagLabel[issue.tag] || issue.tag}
+                                {issue.related_rows?.length > 0 && (
+                                  <em className="cell-tag-rows">
+                                    {" ↔ row "}
+                                    {issue.related_rows.join(", ")}
+                                  </em>
+                                )}
                               </span>
                             </td>
                           );

@@ -12,9 +12,15 @@ const METHOD_LABELS = {
 };
 
 export default function MappingStep({ file, onSaved, onNext }) {
-  // Editable copy: master column -> chosen input header (or "").
+  // Editable copy: master column -> chosen primary input header (or "").
   const [choices, setChoices] = useState(() =>
     Object.fromEntries(file.mapping.map((m) => [m.master_column, m.input_header || ""]))
+  );
+  // master column -> extra input headers feeding the SAME master column.
+  const [extras, setExtras] = useState(() =>
+    Object.fromEntries(
+      file.mapping.map((m) => [m.master_column, [...(m.extra_headers || [])]])
+    )
   );
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -42,8 +48,11 @@ export default function MappingStep({ file, onSaved, onNext }) {
   const usedCounts = useMemo(() => {
     const c = {};
     Object.values(choices).forEach((h) => h && (c[h] = (c[h] || 0) + 1));
+    Object.values(extras).forEach((list) =>
+      list.forEach((h) => h && (c[h] = (c[h] || 0) + 1))
+    );
     return c;
-  }, [choices]);
+  }, [choices, extras]);
 
   const buckets = useMemo(() => {
     const b = { attention: [], matched: [], blank: [] };
@@ -56,10 +65,33 @@ export default function MappingStep({ file, onSaved, onNext }) {
   const matchedCount = buckets.matched.length + buckets.attention.length;
   const pct = Math.round((matchedCount / total) * 100);
   const contentCount = file.mapping.filter((m) => m.method === "content").length;
-  const trulyUnused = file.headers.filter((h) => !Object.values(choices).includes(h));
+  const trulyUnused = file.headers.filter((h) => !usedCounts[h]);
 
   function setChoice(master, header) {
     setChoices((c) => ({ ...c, [master]: header }));
+    setSaved(false);
+  }
+
+  function addExtra(master) {
+    setExtras((e) => ({ ...e, [master]: [...(e[master] || []), ""] }));
+    setSaved(false);
+  }
+
+  function setExtra(master, idx, header) {
+    setExtras((e) => {
+      const list = [...(e[master] || [])];
+      list[idx] = header;
+      return { ...e, [master]: list };
+    });
+    setSaved(false);
+  }
+
+  function removeExtra(master, idx) {
+    setExtras((e) => {
+      const list = [...(e[master] || [])];
+      list.splice(idx, 1);
+      return { ...e, [master]: list };
+    });
     setSaved(false);
   }
 
@@ -70,9 +102,15 @@ export default function MappingStep({ file, onSaved, onNext }) {
       const assignments = Object.fromEntries(
         Object.entries(choices).map(([m, h]) => [m, h || null])
       );
+      // Only send non-empty extra sources; the backend de-dupes against the primary.
+      const extra = Object.fromEntries(
+        Object.entries(extras)
+          .map(([m, list]) => [m, list.filter(Boolean)])
+          .filter(([, list]) => list.length > 0)
+      );
       const updated = await api(`/api/files/${file.id}/mapping`, {
         method: "PUT",
-        body: { assignments },
+        body: { assignments, extra },
       });
       onSaved(updated);
       setSaved(true);
@@ -81,6 +119,20 @@ export default function MappingStep({ file, onSaved, onNext }) {
     } finally {
       setBusy(false);
     }
+  }
+
+  // Options for a column <select>. Headers already mapped to another column get a
+  // ✓ marker (but stay selectable — a column can feed more than one master).
+  function columnOptions(current) {
+    return file.headers.map((h) => {
+      const usedElsewhere = (usedCounts[h] || 0) > (h === current ? 1 : 0);
+      return (
+        <option key={h} value={h}>
+          {usedElsewhere ? "✓ " : ""}
+          {h}
+        </option>
+      );
+    });
   }
 
   function matchQuery(m) {
@@ -117,13 +169,41 @@ export default function MappingStep({ file, onSaved, onNext }) {
             onChange={(e) => setChoice(m.master_column, e.target.value)}
           >
             <option value="">— leave blank —</option>
-            {file.headers.map((h) => (
-              <option key={h} value={h}>
-                {h}
-              </option>
-            ))}
+            {columnOptions(chosen)}
           </select>
           {collision && <div className="collision-note">used more than once</div>}
+
+          {/* Extra input columns merged into this same master column. */}
+          {(extras[m.master_column] || []).map((h, idx) => (
+            <div key={idx} className="extra-source">
+              <span className="extra-plus">+</span>
+              <select
+                value={h}
+                onChange={(e) => setExtra(m.master_column, idx, e.target.value)}
+              >
+                <option value="">— choose a column —</option>
+                {columnOptions(h)}
+              </select>
+              <button
+                type="button"
+                className="extra-remove"
+                title="Remove this column"
+                onClick={() => removeExtra(m.master_column, idx)}
+              >
+                <Icon name="x" size={13} />
+              </button>
+            </div>
+          ))}
+
+          {chosen && (
+            <button
+              type="button"
+              className="extra-add"
+              onClick={() => addExtra(m.master_column)}
+            >
+              <Icon name="plus" size={12} /> Add another column
+            </button>
+          )}
         </div>
         <span className={`method-badge ${label.cls}`} title={title}>
           {label.icon && <Icon name={label.icon} size={12} />}

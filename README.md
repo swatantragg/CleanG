@@ -19,7 +19,27 @@ The Excel cleaning steps themselves come in the next milestones.
 
 ---
 
-## 1. Backend setup
+## Docker
+
+Runs the whole stack (frontend + backend) in two containers. The database
+stays external (Neon) via `backend/.env` → `DATABASE_URL`.
+
+```bash
+cd CleanG
+cp backend/.env.example backend/.env   # fill DATABASE_URL, SECRET_KEY, admin creds
+docker compose up -d --build
+```
+
+- App:  http://localhost:5173
+- API:  http://localhost:3000/api/health (also proxied at `:5173/api`)
+
+`docker compose down` to stop. The backend seeds the admin + master schema on
+first start; the frontend is built and served by nginx, which proxies `/api`
+to the backend.
+
+---
+
+## 1. Backend setup (local, without Docker)
 
 ```bash
 cd backend

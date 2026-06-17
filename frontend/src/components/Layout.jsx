@@ -1,6 +1,13 @@
-import { NavLink, Outlet, useNavigate } from "react-router-dom";
+import { useEffect, useState } from "react";
+import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import { useAuth } from "../context/AuthContext.jsx";
 import Icon from "./Icon.jsx";
+
+const THEME_KEY = "mrm_theme";
+
+export function applyTheme(theme) {
+  document.documentElement.setAttribute("data-theme", theme);
+}
 
 function initials(name = "") {
   return name
@@ -14,6 +21,18 @@ function initials(name = "") {
 export default function Layout() {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
+  const { pathname } = useLocation();
+  // The branch workspace (upload → map → clean → review) is data-dense: give it
+  // the full screen width so the review grid uses the side space.
+  const wide = /^\/branches\/\d+/.test(pathname);
+
+  const [theme, setTheme] = useState(
+    () => localStorage.getItem(THEME_KEY) || "light"
+  );
+  useEffect(() => {
+    applyTheme(theme);
+    localStorage.setItem(THEME_KEY, theme);
+  }, [theme]);
 
   function handleLogout() {
     logout();
@@ -24,7 +43,7 @@ export default function Layout() {
     <div className="app">
       <header className="topbar">
         <div className="brand">
-          <span className="brand-mark">MRM</span> Cleanser
+          <img src="/logo.png" alt="MRM Cleanser" className="brand-logo" />
         </div>
         <nav className="nav">
           <NavLink to="/" end>
@@ -37,6 +56,13 @@ export default function Layout() {
           )}
         </nav>
         <div className="user-box">
+          <button
+            className="btn ghost sm theme-toggle"
+            onClick={() => setTheme((t) => (t === "dark" ? "light" : "dark"))}
+            title={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
+          >
+            <Icon name={theme === "dark" ? "sun" : "moon"} size={16} />
+          </button>
           <div className="avatar">{initials(user?.full_name)}</div>
           <div style={{ display: "flex", flexDirection: "column", lineHeight: 1.2 }}>
             <span className="user-name">{user?.full_name}</span>
@@ -49,7 +75,7 @@ export default function Layout() {
           </button>
         </div>
       </header>
-      <main className="content">
+      <main className={`content${wide ? " content-wide" : ""}`}>
         <Outlet />
       </main>
     </div>

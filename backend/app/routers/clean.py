@@ -84,7 +84,11 @@ def _active_columns(f: UploadedFile) -> list[str]:
 # cleaned rows — they're recomputed on demand (milliseconds) and memoised
 # per-process so repeated review requests don't re-clean from scratch.
 # --------------------------------------------------------------------------
-_CACHE: dict[int, tuple[str, list[CleanRow]]] = {}
+# Per-process cache: keyed by file id, holds the cleaned rows AND the derived
+# summary/profile so repeated review/paging requests (and the clean -> review
+# hand-off) never re-clean or re-aggregate. All three are pure functions of the
+# file's signature, so a single signature check keeps them consistent.
+_CACHE: dict[int, dict] = {}
 _CACHE_LIMIT = 16
 
 
@@ -96,12 +100,12 @@ def _signature(f: UploadedFile) -> str:
     )
 
 
-def build_rows(f: UploadedFile) -> list[CleanRow]:
-    """The cleaned, corrected, duplicate-checked rows for a file (cached)."""
+def _entry(f: UploadedFile) -> dict:
+    """The cache entry for a file (rows + memoised summary/profile), built lazily."""
     sig = _signature(f)
     hit = _CACHE.get(f.id)
-    if hit and hit[0] == sig:
-        return hit[1]
+    if hit and hit["sig"] == sig:
+        return hit
 
     base = clean_dataset(f.data, f.headers, f.mapping)
     corrections = f.corrections or {}
@@ -121,8 +125,28 @@ def build_rows(f: UploadedFile) -> list[CleanRow]:
 
     if len(_CACHE) >= _CACHE_LIMIT:
         _CACHE.pop(next(iter(_CACHE)))
-    _CACHE[f.id] = (sig, rows)
-    return rows
+    entry = {"sig": sig, "rows": rows, "summary": None, "profile": None}
+    _CACHE[f.id] = entry
+    return entry
+
+
+def build_rows(f: UploadedFile) -> list[CleanRow]:
+    """The cleaned, corrected, duplicate-checked rows for a file (cached)."""
+    return _entry(f)["rows"]
+
+
+def _get_summary(f: UploadedFile) -> "CleanSummary":
+    e = _entry(f)
+    if e["summary"] is None:
+        e["summary"] = _summary(f, e["rows"])
+    return e["summary"]
+
+
+def _get_profile(f: UploadedFile) -> "DataProfile":
+    e = _entry(f)
+    if e["profile"] is None:
+        e["profile"] = _build_profile(_active_columns(f), e["rows"])
+    return e["profile"]
 
 
 def _invalidate(file_id: int) -> None:
@@ -183,12 +207,13 @@ def run_clean(
             status.HTTP_422_UNPROCESSABLE_ENTITY,
             "Map at least one column before cleaning.",
         )
-    _invalidate(file_id)
-    rows = build_rows(f)
+    # Cleaning is a pure function of the file's signature, so a warm cache is
+    # reused (no forced re-clean). The signature changes if the mapping did.
+    summary = _get_summary(f)
     if f.status not in (FileStatus.cleaned, FileStatus.committed):
         f.status = FileStatus.cleaned
         db.commit()
-    return _summary(f, rows)
+    return summary
 
 
 @router.get("/api/files/{file_id}/clean/summary", response_model=CleanSummary)
@@ -198,7 +223,7 @@ def clean_summary(
     user: User = Depends(get_current_user),
 ):
     f = _get_file_or_404(file_id, user, db)
-    return _summary(f, build_rows(f))
+    return _get_summary(f)
 
 
 def _build_profile(columns: list[str], rows: list[CleanRow]) -> DataProfile:
@@ -324,7 +349,7 @@ def clean_profile(
     user: User = Depends(get_current_user),
 ):
     f = _get_file_or_404(file_id, user, db)
-    return _build_profile(_active_columns(f), build_rows(f))
+    return _get_profile(f)
 
 
 @router.get("/api/files/{file_id}/review", response_model=ReviewOut)
@@ -353,8 +378,8 @@ def review(
     page_rows = filtered[page * page_size : page * page_size + page_size]
 
     return ReviewOut(
-        summary=_summary(f, rows),
-        profile=_build_profile(_active_columns(f), rows) if include_profile else None,
+        summary=_get_summary(f),
+        profile=_get_profile(f) if include_profile else None,
         rows=[_row_out(r) for r in page_rows],
         total=total,
         page=page,
@@ -448,7 +473,7 @@ def bulk_fix(
 
     db.commit()
     _invalidate(file_id)
-    return _summary(f, build_rows(f))
+    return _get_summary(f)
 
 
 @router.post("/api/files/{file_id}/commit", response_model=CommitResult)
