@@ -76,6 +76,40 @@ TAG_LABELS = {
     "duplicate": "Duplicate record",
 }
 
+# Human-readable labels for the *kinds of cleaning* we apply (auto-fixes).
+# These let the UI show a breakdown of what was corrected, so accuracy is visible.
+FIX_LABELS = {
+    "trimmed": "Tidied formatting",
+    "removed_junk": "Removed junk value",
+    "reformatted_date": "Reformatted date",
+    "normalized_duration": "Standardized duration",
+    "normalized_isrc": "Standardized ISRC",
+    "normalized_upc": "Cleaned barcode",
+    "normalized_code": "Standardized code",
+    "normalized_path": "Normalized path",
+    "standardized_category": "Standardized value",
+    "normalized_language": "Standardized language",
+    "normalized_percent": "Standardized percentage",
+}
+
+# Default fix category per field type (overridden by "removed_junk" when a
+# non-empty value was cleared as junk).
+_FIX_TAG_BY_TYPE = {
+    "isrc": "normalized_isrc",
+    "upc": "normalized_upc",
+    "date": "reformatted_date",
+    "duration": "normalized_duration",
+    "vocal_instrumental": "standardized_category",
+    "language": "normalized_language",
+    "percent": "normalized_percent",
+    "code": "normalized_code",
+    "path": "normalized_path",
+    "text": "trimmed",
+    "name": "trimmed",
+    "category": "trimmed",
+    "serial": "trimmed",
+}
+
 # Values that look like data but mean "nothing here": lone punctuation, common
 # null tokens, etc. We treat these as blank so a "." never poses as real data.
 _PLACEHOLDERS = {
@@ -410,11 +444,15 @@ def clean_cell(master_column: str, value) -> Cell:
     ftype = FIELD_TYPES.get(master_column, "text")
     cleaner = _CLEANERS.get(ftype, _clean_text)
     cell = cleaner(value)
-    if cell.action == "fixed" and ftype in COSMETIC_TYPES:
-        # Tidy-ups (whitespace/case/unicode) are cosmetic, but clearing real junk
-        # (a non-empty value reduced to blank) is a meaningful correction.
+    if cell.action == "fixed":
+        # Clearing real junk (a non-empty value reduced to blank) is a meaningful
+        # correction; whitespace/case/unicode tidy-ups are cosmetic.
         emptied = bool((cell.original or "").strip()) and cell.value == ""
-        cell.cosmetic = not emptied
+        if ftype in COSMETIC_TYPES:
+            cell.cosmetic = not emptied
+        # Categorise the fix so the UI can show what kind of cleaning happened.
+        if cell.tag is None:
+            cell.tag = "removed_junk" if emptied else _FIX_TAG_BY_TYPE.get(ftype, "trimmed")
     return cell
 
 

@@ -6,6 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, defer
 
 from ..core.cleaning import (
+    FIX_LABELS,
     TAG_LABELS,
     CleanRow,
     clean_dataset,
@@ -136,6 +137,7 @@ def _row_out(r: CleanRow) -> CleanRowOut:
 
 def _summary(f: UploadedFile, rows: list[CleanRow]) -> CleanSummary:
     tags: Counter = Counter()
+    fix_tags: Counter = Counter()
     auto_fixed = 0
     clean = 0
     for r in rows:
@@ -146,6 +148,7 @@ def _summary(f: UploadedFile, rows: list[CleanRow]) -> CleanSummary:
                 tags[i["tag"]] += 1
             elif i["action"] == "fixed":
                 auto_fixed += 1
+                fix_tags[i.get("tag") or "trimmed"] += 1
     return CleanSummary(
         total=len(rows),
         clean=clean,
@@ -154,6 +157,10 @@ def _summary(f: UploadedFile, rows: list[CleanRow]) -> CleanSummary:
         tags=[
             TagGroup(tag=t, label=TAG_LABELS.get(t, t), count=c)
             for t, c in tags.most_common()
+        ],
+        fix_tags=[
+            TagGroup(tag=t, label=FIX_LABELS.get(t, t), count=c)
+            for t, c in fix_tags.most_common()
         ],
         columns=_active_columns(f),
     )
