@@ -126,7 +126,8 @@ class CleanSummary(BaseModel):
     clean: int
     errors: int
     auto_fixed: int  # number of cells auto-corrected
-    tags: list[TagGroup]
+    tags: list[TagGroup]  # error types (needs review), grouped
+    fix_tags: list[TagGroup] = []  # kinds of cleaning applied, grouped
     columns: list[str]  # active master columns, in order
 
 

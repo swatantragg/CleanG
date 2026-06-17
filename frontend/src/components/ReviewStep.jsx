@@ -18,6 +18,18 @@ const TAG_COLORS = {
   suspect_value: "#db2777",
   missing_required: "#dc2626",
   duplicate: "#0d9488",
+  // Cleaning (auto-fix) categories — calm green/teal hues.
+  trimmed: "#16a34a",
+  removed_junk: "#0d9488",
+  reformatted_date: "#0891b2",
+  normalized_duration: "#059669",
+  normalized_isrc: "#10b981",
+  normalized_upc: "#0ea5e9",
+  normalized_code: "#14b8a6",
+  normalized_path: "#22c55e",
+  standardized_category: "#16a34a",
+  normalized_language: "#10b981",
+  normalized_percent: "#06b6d4",
 };
 const tagColor = (t) => TAG_COLORS[t] || "#6b7280";
 
@@ -50,6 +62,7 @@ export default function ReviewStep({ file, onCommitted }) {
   const tagLabel = useMemo(() => {
     const map = {};
     (summary?.tags || []).forEach((t) => (map[t.tag] = t.label));
+    (summary?.fix_tags || []).forEach((t) => (map[t.tag] = t.label));
     return map;
   }, [summary]);
 
@@ -60,7 +73,7 @@ export default function ReviewStep({ file, onCommitted }) {
     const s = new Set();
     rows.forEach((r) =>
       r.issues.forEach((i) => {
-        if (i.action === "error" && i.tag === activeTag) s.add(i.column);
+        if (i.tag === activeTag) s.add(i.column); // error OR cleaning tag
       })
     );
     return columns.filter((c) => s.has(c)); // keep master order among the focused
@@ -87,7 +100,8 @@ export default function ReviewStep({ file, onCommitted }) {
           page_size: String(PAGE_SIZE),
           include_profile: String(withProfile),
         });
-        if (view === "error" && activeTag) qs.set("tag", activeTag);
+        // Filter by the selected tag in any view (error tag or cleaning tag).
+        if (activeTag) qs.set("tag", activeTag);
         const d = await api(`/api/files/${file.id}/review?${qs.toString()}`);
         setSummary(d.summary);
         if (d.profile) setProfile(d.profile);
@@ -128,9 +142,13 @@ export default function ReviewStep({ file, onCommitted }) {
   }
 
   function fixedMap(row) {
+    // When a cleaning type is selected, mark only those fixes so the user can
+    // focus on one kind of correction at a time.
     const m = {};
     row.issues.forEach((i) => {
-      if (i.action === "fixed") m[i.column] = i;
+      if (i.action === "fixed" && (!activeTag || i.tag === activeTag)) {
+        m[i.column] = i;
+      }
     });
     return m;
   }
@@ -355,12 +373,47 @@ export default function ReviewStep({ file, onCommitted }) {
         </>
       )}
 
+      {/* What the tool cleaned (accuracy breakdown). Shown in "All rows" and
+          "Clean"; pick one to highlight those cells. Note: some fixes (e.g. junk
+          cleared from a required field) leave the row needing review, so they only
+          appear under "All rows". */}
+      {(view === "all" || view === "clean") &&
+        summary &&
+        summary.fix_tags?.length > 0 && (
+          <>
+            <div className="breakdown-label muted small">
+              <Icon name="sparkles" size={13} /> What the tool cleaned — pick one to highlight it
+            </div>
+            <div className="tag-filter">
+              <button
+                className={`tag-chip ${!activeTag ? "active" : ""}`}
+                onClick={() => switchView(view, null)}
+              >
+                {view === "clean" ? "All clean" : "All rows"}{" "}
+                <span className="n">{view === "clean" ? summary.clean : summary.total}</span>
+              </button>
+              {summary.fix_tags.map((t) => (
+                <button
+                  key={t.tag}
+                  className={`tag-chip ${activeTag === t.tag ? "active" : ""}`}
+                  style={{ "--tag": tagColor(t.tag) }}
+                  onClick={() => switchView(view, t.tag)}
+                  title={`${t.count} cell${t.count === 1 ? "" : "s"} cleaned across the dataset`}
+                >
+                  <span className="tag-dot" />
+                  {t.label} <span className="n">{t.count}</span>
+                </button>
+              ))}
+            </div>
+          </>
+        )}
+
       {/* Legend — what the cell colours mean */}
       <div className="grid-legend">
-        <span><i className="lg-dot green" /> Auto-fixed by the tool</span>
+        <span><i className="lg-dot green" /> Auto-fixed (labelled by what changed)</span>
         <span><i className="lg-dot red" /> Needs your review</span>
         <span><i className="lg-dot blank" /> Empty cell</span>
-        <span className="muted small lg-hint">Hover any cell to see details · click a flagged cell to edit</span>
+        <span className="muted small lg-hint">Hover a cell to see the original value · click a flagged cell to edit</span>
       </div>
 
       {/* Data grid */}
@@ -444,14 +497,26 @@ export default function ReviewStep({ file, onCommitted }) {
                             <td
                               key={c}
                               className="cell-fixed"
-                              title={`Auto-fixed${fix.cosmetic ? " (tidied)" : ""}${
+                              style={{ "--tag": tagColor(fix.tag) }}
+                              title={`${tagLabel[fix.tag] || "Auto-fixed"}${
                                 from ? ` — was “${from}”` : ""
                               }`}
                             >
-                              <span className="fix-mark">
-                                <Icon name="check" size={11} />
+                              <span className="fixed-val">
+                                <span className="fix-mark">
+                                  <Icon name="check" size={11} />
+                                </span>
+                                {val ? (
+                                  val
+                                ) : from ? (
+                                  <s className="orig-removed">{from}</s>
+                                ) : (
+                                  "—"
+                                )}
                               </span>
-                              {val || "—"}
+                              <span className="cell-fix-tag">
+                                {tagLabel[fix.tag] || "Cleaned"}
+                              </span>
                             </td>
                           );
                         }

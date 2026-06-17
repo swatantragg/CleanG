@@ -1444,6 +1444,16 @@ input::placeholder {
   gap: 0.5rem;
   margin-bottom: 1.25rem;
 }
+.breakdown-label {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  margin-bottom: 0.55rem;
+  font-weight: 600;
+}
+.breakdown-label .icon {
+  color: var(--green);
+}
 .tag-chip {
   display: inline-flex;
   align-items: center;
@@ -1734,9 +1744,15 @@ input::placeholder {
 .grid-table td.cell-blank {
   color: var(--muted-2);
 }
-/* Auto-fixed cell: a faint green wash + a small check so the tool's work shows. */
+/* Auto-fixed cell: faint wash + a small check so the tool's work shows. Defaults
+   to green; when a cleaning type is focused it takes that type's colour. */
 .grid-table td.cell-fixed {
-  background: color-mix(in srgb, var(--green) 5%, #fff);
+  background: color-mix(in srgb, var(--tag, var(--green)) 6%, #fff);
+  vertical-align: top;
+}
+.fixed-val {
+  display: inline-flex;
+  align-items: center;
 }
 .fix-mark {
   display: inline-grid;
@@ -1745,9 +1761,24 @@ input::placeholder {
   height: 15px;
   margin-right: 0.35rem;
   border-radius: 50%;
-  background: var(--green);
+  background: var(--tag, var(--green));
   color: #fff;
   vertical-align: -2px;
+  flex: none;
+}
+.cell-fix-tag {
+  display: block;
+  margin-top: 0.2rem;
+  font-size: 0.62rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+  color: var(--tag, var(--green));
+}
+/* The original junk value that was removed, shown struck-through for context. */
+.orig-removed {
+  color: var(--muted-2);
+  text-decoration: line-through;
 }
 
 /* Legend above the grid */
