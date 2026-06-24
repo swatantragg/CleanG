@@ -3102,24 +3102,70 @@ input::placeholder {
   border-top: 1px solid var(--border);
 }
 
+/* Merge-values controls in the unique-values panel */
+.unique-mergebar {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+  padding: 0 1.1rem 0.6rem;
+}
+.unique-row.picked {
+  background: color-mix(in srgb, var(--brand) 12%, var(--surface));
+}
+.unique-row .row-check {
+  flex: none;
+}
+.unique-merge-foot {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  padding: 0.75rem 1.1rem;
+  border-top: 1px solid var(--border);
+}
+.unique-merge-foot input {
+  flex: 1;
+  min-width: 140px;
+  border: 1px solid var(--border-strong);
+  border-radius: 7px;
+  padding: 0.4rem 0.55rem;
+  font: inherit;
+  color: var(--text);
+  background: var(--surface);
+}
+
 /* Top horizontal scrollbar mirroring the data grid */
 .grid-xscroll {
+  /* A fixed height so the horizontal scrollbar renders fully (a 1px-tall box
+     clips it to an invisible, un-grabbable sliver). */
+  height: 15px;
   overflow-x: auto;
   overflow-y: hidden;
-  margin-bottom: 4px;
+  margin-bottom: 6px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface-2);
   scrollbar-width: thin;
-  scrollbar-color: var(--border-strong) transparent;
+  scrollbar-color: var(--muted-2) var(--surface-2);
+}
+.grid-xscroll-spacer {
+  height: 1px;
 }
 .grid-xscroll::-webkit-scrollbar {
-  height: 11px;
+  height: 13px;
+}
+.grid-xscroll::-webkit-scrollbar-track {
+  background: transparent;
 }
 .grid-xscroll::-webkit-scrollbar-thumb {
-  background: var(--border-strong);
-  border: 3px solid var(--surface);
+  background: var(--muted-2);
+  border: 2px solid var(--surface-2);
   border-radius: 999px;
+  min-width: 48px;
 }
 .grid-xscroll::-webkit-scrollbar-thumb:hover {
-  background: var(--muted-2);
+  background: var(--muted);
 }
 
 /* Delete control on a branch card (admin only) */

@@ -363,6 +363,24 @@ class BulkFix(BaseModel):
     value: str | None = None
 
 
+class ValueRemap(BaseModel):
+    """Human-confirmed merge of column value variants into one canonical value.
+
+    `from_values` are the variants to replace (matched per-piece for pipe-separated
+    name fields, normalized so casing/whitespace don't matter); `to` is the
+    canonical value to keep. Many variants -> one `to` is supported.
+    """
+
+    from_values: list[ShortText]
+    to: ShortText
+
+
+class RemapPreview(BaseModel):
+    """Dry-run result: how many rows a remap would rewrite (before applying)."""
+
+    affected_rows: int
+
+
 class ConflictPair(BaseModel):
     """One cleaned row that nearly matches an existing master record, paired with
     that record so the reviewer can cross-verify and decide which is correct."""

@@ -15,6 +15,7 @@ from ..core.cleaning import (
     NAME_TYPES,
     TAG_LABELS,
     CleanRow,
+    _dedup_norm,
     clean_dataset,
     mark_duplicates,
     revalidate,
@@ -41,6 +42,7 @@ from ..schemas import (
     CommitResult,
     ConflictsResult,
     DataProfile,
+    RemapPreview,
     ReviewOut,
     RowEdit,
     RowsAccept,
@@ -48,6 +50,7 @@ from ..schemas import (
     TagGroup,
     UniqueValue,
     UniqueValuesOut,
+    ValueRemap,
 )
 
 # The dataset heatmap ribbon is capped at this many pixels; larger files are
@@ -132,6 +135,41 @@ def _signature(f: UploadedFile) -> str:
     )
 
 
+def _mark_corrected(
+    base_values: dict, cleaned: dict, issues: list[dict], override: dict
+) -> list[dict]:
+    """Flag every cell a human changed (merge / inline edit / bulk set) so the
+    Review grid highlights it as "Manually corrected".
+
+    A cell is corrected when its final value differs from the value cleaning
+    produced before the overlay. The marker carries the pre-correction value as
+    `original`, so hovering shows what it was. Cells still in error keep their
+    error flag (it already highlights and explains the problem); any cosmetic
+    auto-fix flag on a corrected cell is superseded by this stronger marker.
+    """
+    edited = {
+        col for col in override
+        if (cleaned.get(col) or "") != (base_values.get(col) or "")
+    }
+    if not edited:
+        return issues
+    err_cols = {i["column"] for i in issues if i["action"] == "error"}
+    kept = [i for i in issues if i["column"] not in edited or i["action"] == "error"]
+    for col in edited:
+        if col in err_cols:
+            continue
+        kept.append({
+            "column": col,
+            "action": "fixed",
+            "tag": "corrected",
+            "message": "Manually corrected in review.",
+            "value": cleaned.get(col, ""),
+            "original": base_values.get(col, ""),
+            "cosmetic": False,
+        })
+    return kept
+
+
 def _entry(f: UploadedFile) -> dict:
     """The cache entry for a file (rows + memoised summary/profile), built lazily."""
     sig = _signature(f)
@@ -151,6 +189,7 @@ def _entry(f: UploadedFile) -> dict:
         override = corrections.get(str(r.index))
         if override:
             cleaned, issues = revalidate({**r.values, **override})
+            issues = _mark_corrected(r.values, cleaned, issues, override)
             r = CleanRow(index=r.index, values=cleaned, issues=issues)
         rows.append(r)
 
@@ -566,6 +605,112 @@ def column_unique_values(
         column=column,
         total_distinct=len(counts),
         values=[UniqueValue(value=v, count=n) for v, n in counts.most_common(_UNIQUE_CAP)],
+    )
+
+
+def _remap_cell(col: str, value: str, alias: dict[str, str]) -> str:
+    """Rewrite one cell, replacing each matching piece via `alias` (keyed by the
+    normalized piece). Name fields are split on NAME_SEP, each piece remapped,
+    then re-joined de-duped with order preserved (so "Shreya Ghosal | Arijit" ->
+    "Shreya Ghoshal | Arijit", and a cell holding both variants collapses to one).
+    Non-name columns match/replace the whole value."""
+    pieces = _value_pieces(col, value)
+    if not pieces:
+        return value
+    out: list[str] = []
+    for p in pieces:
+        repl = alias.get(_dedup_norm(p), p)
+        # The canonical value may itself be multi-name ("A | B"); split it too.
+        for sub in (_value_pieces(col, repl) or [repl]):
+            if sub not in out:
+                out.append(sub)
+    if _is_name_column(col):
+        return NAME_SEP.join(out)
+    return out[0] if out else ""
+
+
+def _remap_alias(payload: ValueRemap) -> dict[str, str]:
+    """The {normalized variant -> canonical} map for a remap request, dropping
+    blanks and any variant that already equals the canonical value."""
+    to = payload.to.strip()
+    return {
+        _dedup_norm(v): to
+        for v in payload.from_values
+        if _dedup_norm(v) and _dedup_norm(v) != _dedup_norm(to)
+    }
+
+
+@router.post(
+    "/api/files/{file_id}/columns/{column}/remap/preview", response_model=RemapPreview
+)
+def remap_preview(
+    file_id: int,
+    column: str,
+    payload: ValueRemap,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Dry run: how many rows a value-merge would rewrite — so the reviewer sees
+    the blast radius and confirms before anything changes."""
+    f = _get_file_or_404(file_id, user, db)
+    if column not in _active_columns(f):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Column not found")
+    alias = _remap_alias(payload)
+    if not alias:
+        return RemapPreview(affected_rows=0)
+    affected = sum(
+        1
+        for r in build_rows(f)
+        if _remap_cell(column, r.values.get(column, ""), alias) != r.values.get(column, "")
+    )
+    return RemapPreview(affected_rows=affected)
+
+
+@router.post("/api/files/{file_id}/columns/{column}/remap", response_model=ReviewOut)
+def remap_column_value(
+    file_id: int,
+    column: str,
+    payload: ValueRemap,
+    view: str = "all",
+    tag: str | None = None,
+    tags: str | None = None,
+    sort: str | None = None,
+    dir: str = "asc",
+    contains_col: str | None = None,
+    contains_val: str | None = None,
+    page: int = 0,
+    page_size: int = 50,
+    include_profile: bool = True,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Human-confirmed value merge: replace every `from_values` variant with `to`
+    across the column. Piece-aware for pipe-separated name fields. Each rewrite is
+    stored as a row correction — auditable, reversible (remap back), and picked up
+    by review / export / commit just like an inline edit. Returns the refreshed
+    Review payload so the grid updates in one round-trip."""
+    f = _get_file_or_404(file_id, user, db)
+    if column not in _active_columns(f):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Column not found")
+    alias = _remap_alias(payload)
+    if not alias:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Nothing to remap.")
+
+    corrections = dict(f.corrections or {})
+    for r in build_rows(f):
+        cur = r.values.get(column, "")
+        new = _remap_cell(column, cur, alias)
+        if new != cur:
+            override = dict(corrections.get(str(r.index), {}))
+            override[column] = new
+            corrections[str(r.index)] = override
+    f.corrections = corrections
+    db.commit()
+    _invalidate(file_id)
+    return _review_payload(
+        f, view, tag, page, page_size, include_profile,
+        tags=_split_csv(tags), sort=sort, direction=dir,
+        contains_col=contains_col, contains_val=contains_val,
     )
 
 

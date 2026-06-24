@@ -111,6 +111,7 @@ FIX_LABELS = {
     "normalized_percent": "Standardized percentage",
     "titlecased": "Standardized name casing",
     "combined_columns": "Merged from multiple columns",
+    "corrected": "Manually corrected",
 }
 
 # Default fix category per field type (overridden by "removed_junk" when a

@@ -33,6 +33,9 @@ const TAG_COLORS = {
   standardized_category: "#16a34a",
   normalized_language: "#10b981",
   normalized_percent: "#06b6d4",
+  // Human change (merge / inline edit / bulk set) — distinct indigo so a cell you
+  // manipulated stands out from the tool's own green auto-fixes.
+  corrected: "#6366f1",
 };
 const tagColor = (t) => TAG_COLORS[t] || "#6b7280";
 
@@ -83,10 +86,18 @@ export default function ReviewStep({ file, onCommitted }) {
   const [uniqueSortKey, setUniqueSortKey] = useState("count"); // count | value
   const [uniqueSortDir, setUniqueSortDir] = useState("desc"); // asc | desc
 
+  // --- Merge values (alias a variant into a canonical value) ---
+  const [mergeMode, setMergeMode] = useState(false); // checkboxes shown in panel
+  const [mergePicked, setMergePicked] = useState(() => new Set()); // chosen variants
+  const [mergeTarget, setMergeTarget] = useState(""); // canonical value
+  const [mergeBusy, setMergeBusy] = useState(false);
+  const [mergeConfirm, setMergeConfirm] = useState(null); // {from:[], to, count}
+
   // --- Synced horizontal scrollbar shown above the grid ---
   const gridScrollRef = useRef(null);
   const topScrollRef = useRef(null);
   const [gridWidth, setGridWidth] = useState(0);
+  const [hasXOverflow, setHasXOverflow] = useState(false); // grid wider than viewport
 
   // --- Save confirmation ---
   const [showSaveConfirm, setShowSaveConfirm] = useState(false);
@@ -219,13 +230,23 @@ export default function ReviewStep({ file, onCommitted }) {
 
   // Keep the top scrollbar's width in sync with the grid's full content width so
   // the user can scroll horizontally from the top without reaching the bottom.
+  // Only show it when the grid actually overflows (otherwise it's a stray empty
+  // bar). A ResizeObserver re-measures on layout shifts (panel open, font load).
   useEffect(() => {
+    const el = gridScrollRef.current;
+    if (!el) return;
     const measure = () => {
-      if (gridScrollRef.current) setGridWidth(gridScrollRef.current.scrollWidth);
+      setGridWidth(el.scrollWidth);
+      setHasXOverflow(el.scrollWidth > el.clientWidth + 1);
     };
     measure();
     window.addEventListener("resize", measure);
-    return () => window.removeEventListener("resize", measure);
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => {
+      window.removeEventListener("resize", measure);
+      ro.disconnect();
+    };
   }, [rows, displayColumns, loading]);
 
   function syncFromGrid() {
@@ -459,6 +480,7 @@ export default function ReviewStep({ file, onCommitted }) {
     setUniqueCol(col);
     setUniqueSearch("");
     setUniqueValues([]);
+    resetMerge();
     setUniqueLoading(true);
     try {
       const d = await api(
@@ -469,6 +491,19 @@ export default function ReviewStep({ file, onCommitted }) {
       setError(e.message);
     } finally {
       setUniqueLoading(false);
+    }
+  }
+
+  // Refresh the unique-values list (after a merge the variant is gone and the
+  // canonical value's count has grown).
+  async function reloadUnique(col) {
+    try {
+      const d = await api(
+        `/api/files/${file.id}/columns/${encodeURIComponent(col)}/unique`
+      );
+      setUniqueValues(d.values || []);
+    } catch (e) {
+      setError(e.message);
     }
   }
 
@@ -492,6 +527,69 @@ export default function ReviewStep({ file, onCommitted }) {
     } else {
       setUniqueSortKey(key);
       setUniqueSortDir(key === "count" ? "desc" : "asc");
+    }
+  }
+
+  // --- Merge values -----------------------------------------------------------
+  function resetMerge() {
+    setMergeMode(false);
+    setMergePicked(new Set());
+    setMergeTarget("");
+    setMergeConfirm(null);
+  }
+
+  function toggleMergePick(value) {
+    setMergePicked((s) => {
+      const n = new Set(s);
+      n.has(value) ? n.delete(value) : n.add(value);
+      return n;
+    });
+    // Seed the canonical target with the highest-count pick for convenience.
+    setMergeTarget((t) => t || value);
+  }
+
+  // Step 1: ask the server how many rows the merge would touch, then confirm.
+  async function requestMerge() {
+    const from = [...mergePicked];
+    const to = mergeTarget.trim();
+    if (from.length === 0 || !to) return;
+    setMergeBusy(true);
+    setError("");
+    try {
+      const d = await api(
+        `/api/files/${file.id}/columns/${encodeURIComponent(uniqueCol)}/remap/preview`,
+        { method: "POST", body: { from_values: from, to } }
+      );
+      setMergeConfirm({ from, to, count: d.affected_rows });
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setMergeBusy(false);
+    }
+  }
+
+  // Step 2: apply the confirmed merge — rewrites all matching cells, returns the
+  // refreshed grid, then reloads the unique list.
+  async function confirmMerge() {
+    if (!mergeConfirm) return;
+    const col = uniqueCol;
+    setMergeBusy(true);
+    setError("");
+    try {
+      const d = await api(
+        `/api/files/${file.id}/columns/${encodeURIComponent(col)}/remap?${buildQs(true)}`,
+        {
+          method: "POST",
+          body: { from_values: mergeConfirm.from, to: mergeConfirm.to },
+        }
+      );
+      applyPayload(d);
+      resetMerge();
+      await reloadUnique(col);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setMergeBusy(false);
     }
   }
 
@@ -954,16 +1052,26 @@ export default function ReviewStep({ file, onCommitted }) {
       {/* Legend — what the cell colours mean */}
       <div className="grid-legend">
         <span><i className="lg-dot green" /> Auto-fixed (labelled by what changed)</span>
+        <span><i className="lg-dot" style={{ background: tagColor("corrected") }} /> Manually corrected</span>
         <span><i className="lg-dot red" /> Needs your review</span>
         <span><i className="lg-dot blank" /> Empty cell</span>
         <span className="muted small lg-hint">Hover a cell to see the original value · click a flagged cell to edit</span>
       </div>
 
       {/* Top horizontal scrollbar, synced with the grid — scroll across columns
-          without having to reach the bottom of the table first. */}
-      <div className="grid-xscroll" ref={topScrollRef} onScroll={syncFromTop}>
-        <div style={{ width: gridWidth, height: 1 }} />
-      </div>
+          without having to reach the bottom of the table first. Shown only when
+          the grid overflows horizontally. */}
+      {hasXOverflow && (
+        <div
+          className="grid-xscroll"
+          ref={topScrollRef}
+          onScroll={syncFromTop}
+          aria-label="Scroll table columns"
+          title="Drag to scroll across columns"
+        >
+          <div className="grid-xscroll-spacer" style={{ width: gridWidth }} />
+        </div>
+      )}
 
       {/* Data grid */}
       <div className="grid-scroll" ref={gridScrollRef} onScroll={syncFromGrid}>
@@ -1434,6 +1542,25 @@ export default function ReviewStep({ file, onCommitted }) {
                 </button>
               </div>
             </div>
+
+            {/* Merge variants into one canonical value — tick the duplicates,
+                type the correct spelling, confirm. Applies to every matching cell
+                (pipe-aware) but only when the reviewer confirms. */}
+            <div className="unique-mergebar">
+              <button
+                className={`btn sm ${mergeMode ? "primary" : ""}`}
+                onClick={() => (mergeMode ? resetMerge() : setMergeMode(true))}
+                title="Merge spelling variants of the same name into one"
+              >
+                <Icon name="check" size={14} />
+                {mergeMode ? "Cancel merge" : "Merge values"}
+              </button>
+              {mergeMode && (
+                <span className="muted small">
+                  Tick the variants to merge, then choose the correct value.
+                </span>
+              )}
+            </div>
             <div className="unique-list">
               {uniqueLoading ? (
                 <p className="muted small" style={{ padding: "0.75rem" }}>
@@ -1463,6 +1590,26 @@ export default function ReviewStep({ file, onCommitted }) {
                         No matching values.
                       </p>
                     );
+                  if (mergeMode) {
+                    return shown.map((u) => (
+                      <label
+                        className={`unique-row${
+                          mergePicked.has(u.value) ? " picked" : ""
+                        }`}
+                        key={u.value}
+                        title="Select this variant to merge into the canonical value"
+                      >
+                        <input
+                          type="checkbox"
+                          className="row-check"
+                          checked={mergePicked.has(u.value)}
+                          onChange={() => toggleMergePick(u.value)}
+                        />
+                        <span className="unique-val">{u.value}</span>
+                        <span className="unique-count">{u.count}</span>
+                      </label>
+                    ));
+                  }
                   return shown.map((u) => (
                     <button
                       className={`unique-row${
@@ -1481,7 +1628,32 @@ export default function ReviewStep({ file, onCommitted }) {
                 })()
               )}
             </div>
-            {containsCol === uniqueCol && containsVal && (
+            {mergeMode && (
+              <div className="unique-merge-foot">
+                <datalist id="merge-target-list">
+                  {uniqueValues.map((u) => (
+                    <option key={u.value} value={u.value} />
+                  ))}
+                </datalist>
+                <label className="muted small">
+                  Merge {mergePicked.size} selected into:
+                </label>
+                <input
+                  list="merge-target-list"
+                  placeholder="correct value (e.g. Shreya Ghoshal)"
+                  value={mergeTarget}
+                  onChange={(e) => setMergeTarget(e.target.value)}
+                />
+                <button
+                  className="btn primary sm"
+                  disabled={mergeBusy || mergePicked.size === 0 || !mergeTarget.trim()}
+                  onClick={requestMerge}
+                >
+                  {mergeBusy ? "Checking…" : "Merge…"}
+                </button>
+              </div>
+            )}
+            {!mergeMode && containsCol === uniqueCol && containsVal && (
               <div className="unique-foot">
                 <span className="muted small">
                   Filtering by “{containsVal}”
@@ -1492,6 +1664,51 @@ export default function ReviewStep({ file, onCommitted }) {
               </div>
             )}
           </aside>
+        </div>
+      )}
+
+      {/* Merge confirmation — shows the blast radius before any cell changes */}
+      {mergeConfirm && (
+        <div className="save-overlay" onClick={() => !mergeBusy && setMergeConfirm(null)}>
+          <div className="confirm-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="confirm-spark">
+              <Icon name="check" size={22} />
+            </div>
+            <h3>Merge values?</h3>
+            <p className="muted">
+              Rename{" "}
+              {mergeConfirm.from.map((v, i) => (
+                <span key={v}>
+                  {i > 0 && ", "}
+                  <strong>“{v}”</strong>
+                </span>
+              ))}{" "}
+              → <strong>“{mergeConfirm.to}”</strong> across{" "}
+              <strong>{mergeConfirm.count}</strong> row
+              {mergeConfirm.count === 1 ? "" : "s"} in {uniqueCol}.
+            </p>
+            <p className="muted small">
+              Stored as reviewable corrections — the changed cells show as
+              auto-fixed and can be merged back if needed.
+            </p>
+            <div className="confirm-actions">
+              <button
+                className="btn sm"
+                onClick={() => setMergeConfirm(null)}
+                disabled={mergeBusy}
+              >
+                Cancel
+              </button>
+              <button
+                className="btn primary sm"
+                onClick={confirmMerge}
+                disabled={mergeBusy || mergeConfirm.count === 0}
+              >
+                <Icon name="check" size={15} />
+                {mergeBusy ? "Merging…" : `Merge ${mergeConfirm.count} row${mergeConfirm.count === 1 ? "" : "s"}`}
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>
