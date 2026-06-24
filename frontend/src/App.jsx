@@ -4,6 +4,7 @@ import Layout from "./components/Layout.jsx";
 import Login from "./pages/Login.jsx";
 import Dashboard from "./pages/Dashboard.jsx";
 import Branch from "./pages/Branch.jsx";
+import Standardize from "./pages/Standardize.jsx";
 import Export from "./pages/Export.jsx";
 import AdminUsers from "./pages/AdminUsers.jsx";
 
@@ -36,6 +37,7 @@ export default function App() {
       >
         <Route path="/" element={<Dashboard />} />
         <Route path="/branches/:branchId" element={<Branch />} />
+        <Route path="/standardize" element={<Standardize />} />
         <Route path="/export" element={<Export />} />
         <Route
           path="/users"

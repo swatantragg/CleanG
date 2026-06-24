@@ -49,6 +49,9 @@ export default function Layout() {
           <NavLink to="/" end>
             <Icon name="branch" size={16} /> Branches
           </NavLink>
+          <NavLink to="/standardize">
+            <Icon name="sparkles" size={16} /> Standardize
+          </NavLink>
           <NavLink to="/export">
             <Icon name="download" size={16} /> Export
           </NavLink>

@@ -67,8 +67,8 @@ FIELD_TYPES: dict[str, str] = {
     "LRC File (path)": "path",
     "Lyrical Video (path)": "path",
     "Go Live Date": "date",
-    "Revenue Share": "percent",
-    "Revenue Split": "text",
+    "Revenue Share": "text",
+    "Revenue Split": "percent",
     "Distributor": "category",
     "Territory Restriction": "text",
     "Lead Artist": "name",
@@ -535,15 +535,21 @@ def _clean_percent(value) -> Cell:
     gate = _blank_or_junk(raw, base)
     if gate:
         return gate
-    s = base.replace("%", "").strip()
-    try:
-        num = float(s)
-    except ValueError:
-        return Cell(s, "error", "invalid_percent", "Expected a percentage value.", raw)
-    if not (0 <= num <= 100):
-        return Cell(f"{num:g}", "error", "invalid_percent",
-                    f"Percentage {num:g} is outside 0–100.", raw)
-    out = f"{num:g}"
+    # Revenue Split is multi-party: "60% | 40%". Validate each share, keep order.
+    parts = [p.strip() for p in base.split("|") if p.strip()]
+    cleaned: list[str] = []
+    for part in parts:
+        s = part.replace("%", "").strip()
+        try:
+            num = float(s)
+        except ValueError:
+            return Cell(s, "error", "invalid_percent",
+                        "Expected a percentage value.", raw)
+        if not (0 <= num <= 100):
+            return Cell(f"{num:g}", "error", "invalid_percent",
+                        f"Percentage {num:g} is outside 0–100.", raw)
+        cleaned.append(f"{num:g}")
+    out = " | ".join(cleaned)
     return Cell(out, "fixed" if out != raw else "ok", original=raw)
 
 

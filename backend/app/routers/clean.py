@@ -20,10 +20,11 @@ from ..core.cleaning import (
     revalidate,
 )
 from ..core.http import content_disposition
-from ..core.master_store import upsert_master_records
+from ..core.master_store import find_conflicts, upsert_master_records
 from ..database import get_db
 from ..deps import get_current_user
 from ..models import (
+    MASTER_COLUMN_TO_ATTR,
     ActivityLog,
     Branch,
     FileStatus,
@@ -36,7 +37,9 @@ from ..schemas import (
     CleanRowOut,
     CleanSummary,
     ColumnProfile,
+    CommitRequest,
     CommitResult,
+    ConflictsResult,
     DataProfile,
     ReviewOut,
     RowEdit,
@@ -766,9 +769,32 @@ def bulk_fix(
     return _get_summary(f)
 
 
+@router.post("/api/files/{file_id}/conflicts", response_model=ConflictsResult)
+def check_conflicts(
+    file_id: int,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Near-duplicates between this file's clean rows and the master dataset.
+
+    A conflict is a clean row that all-but-matches an already-stored record
+    (e.g. same singer / album / ISRC / UPC but a different composer or
+    publisher). The frontend stacks each pair for cross-verification and asks the
+    reviewer which is correct before the save proceeds. An empty list means the
+    save can run straight through.
+    """
+    f = _get_file_or_404(file_id, user, db)
+    clean = [r for r in build_rows(f) if r.status == "clean"]
+    return ConflictsResult(
+        conflicts=find_conflicts(db, clean),
+        columns=list(MASTER_COLUMN_TO_ATTR),
+    )
+
+
 @router.post("/api/files/{file_id}/commit", response_model=CommitResult)
 def commit_clean(
     file_id: int,
+    payload: CommitRequest | None = None,
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
@@ -778,14 +804,19 @@ def commit_clean(
     column per master field), de-duplicated against everything already stored:
     an identical recording is not saved twice, and a row that matches except for
     its Label / Publisher / Distributor updates the existing record to the latest
-    owner. Each save is recorded in the per-branch activity log.
+    owner. Near-duplicates the reviewer flagged via `/conflicts` are applied per
+    their decision (`resolutions`). Each save is recorded in the activity log.
     """
     f = _get_file_or_404(file_id, user, db)
     rows = build_rows(f)
     clean = [r for r in rows if r.status == "clean"]
     errors = len(rows) - len(clean)
 
-    counts = upsert_master_records(db, f.branch_id, f.id, [r.values for r in clean])
+    resolutions = {
+        int(idx): {"decision": res.decision, "master_id": res.master_id}
+        for idx, res in (payload.resolutions if payload else {}).items()
+    }
+    counts = upsert_master_records(db, f.branch_id, f.id, clean, resolutions)
     db.add(ActivityLog(
         branch_id=f.branch_id,
         file_id=f.id,
@@ -803,4 +834,5 @@ def commit_clean(
         inserted=counts["inserted"],
         updated=counts["updated"],
         duplicates=counts["duplicates"],
+        skipped_conflicts=counts["skipped_conflicts"],
     )
