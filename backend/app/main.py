@@ -12,7 +12,7 @@ from .config import get_settings
 from .core.limiter import limiter
 from .database import Base, SessionLocal, engine
 from .models import MasterColumn, User, UserRole
-from .routers import auth, branches, clean, files, master, users
+from .routers import auth, branches, clean, files, master, standardize, users
 from .security import hash_password
 
 settings = get_settings()
@@ -139,6 +139,7 @@ app.include_router(branches.router)
 app.include_router(master.router)
 app.include_router(files.router)
 app.include_router(clean.router)
+app.include_router(standardize.router)
 
 
 @app.get("/api/health")

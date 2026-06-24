@@ -237,6 +237,28 @@ class PreviewOut(BaseModel):
     total_rows: int
 
 
+# ---- Standardize ----
+class StandardizeMapping(BaseModel):
+    """How one master column was filled during standardization."""
+
+    master_column: str
+    sources: list[str]  # input columns feeding it (merged with " | " when >1)
+    matched: bool  # False -> nothing mapped here, the column comes out blank
+
+
+class StandardizePreview(BaseModel):
+    """Preview of a standardized file: the resolved column mapping plus a sample
+    of the master-formatted rows. The full file is fetched via the download
+    endpoint."""
+
+    columns: list[str]  # the full master schema, in order
+    mapping: list[StandardizeMapping]
+    rows: list[dict]  # sample rows, keyed by master column
+    total_rows: int
+    matched_columns: int  # master columns that got a source
+    filename: str
+
+
 # ---- Cleaning / review ----
 class TagGroup(BaseModel):
     tag: str
@@ -341,9 +363,38 @@ class BulkFix(BaseModel):
     value: str | None = None
 
 
+class ConflictPair(BaseModel):
+    """One cleaned row that nearly matches an existing master record, paired with
+    that record so the reviewer can cross-verify and decide which is correct."""
+
+    row_index: int
+    master_id: int
+    differences: list[str]  # master columns whose values differ
+    cleaned: dict  # {master column: value} for the row in this upload
+    master: dict   # {master column: value} for the stored record
+
+
+class ConflictsResult(BaseModel):
+    conflicts: list[ConflictPair]
+    columns: list[str]  # master columns, in display order
+
+
+class ConflictResolution(BaseModel):
+    decision: str  # "cleaned" | "master" | "both"
+    master_id: int | None = None
+
+
+class CommitRequest(BaseModel):
+    """Optional body for the commit: the reviewer's call on each near-duplicate,
+    keyed by row index. Absent rows take the normal dedup path."""
+
+    resolutions: dict[str, ConflictResolution] = {}
+
+
 class CommitResult(BaseModel):
     committed: int  # inserted + updated (records actually written this save)
     skipped_errors: int
     inserted: int = 0  # brand-new records added to the master dataset
     updated: int = 0  # existing records refreshed to a new owner (label/publisher)
     duplicates: int = 0  # already present, identical — not stored again
+    skipped_conflicts: int = 0  # near-duplicates the reviewer kept as the master

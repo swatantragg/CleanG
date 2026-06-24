@@ -91,6 +91,12 @@ export default function ReviewStep({ file, onCommitted }) {
   // --- Save confirmation ---
   const [showSaveConfirm, setShowSaveConfirm] = useState(false);
 
+  // --- Near-duplicate review (cleaned row vs. an existing master record) ---
+  const [checkingConflicts, setCheckingConflicts] = useState(false);
+  const [conflicts, setConflicts] = useState(null); // [{row_index, master_id, ...}]
+  const [conflictColumns, setConflictColumns] = useState([]); // ordered field list
+  const [resolutions, setResolutions] = useState({}); // row_index -> "cleaned"|"master"|"both"
+
   // Headers come straight from the mapping we already have, so the grid frame
   // renders instantly instead of waiting on the network.
   const columns = useMemo(
@@ -533,11 +539,72 @@ export default function ReviewStep({ file, onCommitted }) {
     }
   }
 
-  async function commit() {
+  // Step 1 of the save: look for clean rows that nearly match a record already
+  // in the master dataset. If any are found, the reviewer resolves each pair
+  // (which is correct?) before the write; otherwise the save runs straight on.
+  async function checkConflicts() {
+    setBusy(true);
+    setCheckingConflicts(true);
+    setError("");
+    try {
+      const res = await api(`/api/files/${file.id}/conflicts`, { method: "POST" });
+      if (!res.conflicts || res.conflicts.length === 0) {
+        await commit();
+        return;
+      }
+      setConflictColumns(res.columns || []);
+      setConflicts(res.conflicts);
+      // Default every pair to "both are correct" — the safe, non-destructive call
+      // (store the new row, leave the existing one untouched) until the user picks.
+      setResolutions(
+        Object.fromEntries(res.conflicts.map((c) => [c.row_index, "both"]))
+      );
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setCheckingConflicts(false);
+      setBusy(false);
+    }
+  }
+
+  // Apply the reviewer's near-duplicate decisions. Any on-the-spot edits are
+  // persisted as row corrections FIRST (so the corrected values are what get
+  // pushed to the master dataset), then the save runs with the resolutions.
+  async function saveConflicts(edits) {
+    const hasEdits = edits && Object.keys(edits).length > 0;
+    if (hasEdits) {
+      setBusy(true);
+      setError("");
+      try {
+        await api(`/api/files/${file.id}/rows`, {
+          method: "PUT",
+          body: { edits },
+        });
+      } catch (err) {
+        setError(err.message);
+        setBusy(false);
+        return;
+      }
+    }
+    await commit(conflicts);
+  }
+
+  // `pairs` are the resolved near-duplicates (omitted on a conflict-free save).
+  async function commit(pairs = null) {
     setBusy(true);
     setSaving(true);
     setProgress(6);
     setError("");
+    const body = pairs
+      ? {
+          resolutions: Object.fromEntries(
+            pairs.map((c) => [
+              String(c.row_index),
+              { decision: resolutions[c.row_index] || "both", master_id: c.master_id },
+            ])
+          ),
+        }
+      : undefined;
     // The save is a single request, so we animate an indeterminate bar that
     // creeps toward ~92% while the server de-duplicates and writes, then snaps
     // to 100% on success — so the user can see it's working, not frozen.
@@ -545,7 +612,8 @@ export default function ReviewStep({ file, onCommitted }) {
       setProgress((p) => (p >= 92 ? 92 : p + Math.max(1, (92 - p) * 0.08)));
     }, 280);
     try {
-      const res = await api(`/api/files/${file.id}/commit`, { method: "POST" });
+      setConflicts(null);
+      const res = await api(`/api/files/${file.id}/commit`, { method: "POST", body });
       clearInterval(timer);
       setProgress(100);
       // Let the full bar register before swapping to the success screen.
@@ -651,6 +719,35 @@ export default function ReviewStep({ file, onCommitted }) {
             </p>
           </div>
         </div>
+      )}
+
+      {checkingConflicts && (
+        <div className="save-overlay">
+          <div className="save-modal">
+            <div className="save-spark">
+              <Icon name="sparkles" size={22} />
+            </div>
+            <h3>Checking against the master dataset…</h3>
+            <div className="save-progress indeterminate">
+              <span />
+            </div>
+            <p className="muted small">
+              Looking for rows that nearly match a record already saved.
+            </p>
+          </div>
+        </div>
+      )}
+
+      {conflicts && conflicts.length > 0 && (
+        <ConflictReview
+          conflicts={conflicts}
+          columns={conflictColumns}
+          resolutions={resolutions}
+          setResolutions={setResolutions}
+          busy={busy}
+          onCancel={() => setConflicts(null)}
+          onConfirm={saveConflicts}
+        />
       )}
 
       <div className="page-head">
@@ -1276,7 +1373,7 @@ export default function ReviewStep({ file, onCommitted }) {
                 className="btn primary sm"
                 onClick={() => {
                   setShowSaveConfirm(false);
-                  commit();
+                  checkConflicts();
                 }}
                 disabled={busy}
               >
@@ -1397,6 +1494,205 @@ export default function ReviewStep({ file, onCommitted }) {
           </aside>
         </div>
       )}
+    </div>
+  );
+}
+
+// The three calls a reviewer can make on a near-duplicate pair.
+const CHOICES = [
+  { key: "cleaned", label: "Cleaned is correct", hint: "Update the master record with this row" },
+  { key: "master", label: "Master is correct", hint: "Keep the existing record, skip this row" },
+  { key: "both", label: "Both are correct", hint: "Keep both — add this row as a new record" },
+];
+
+// Mirror of the backend's value normalization so the "differs" highlight updates
+// live as the reviewer edits a cleaned cell.
+const normVal = (v) => String(v ?? "").replace(/\s+/g, " ").trim().toLowerCase();
+
+// A full-screen review of clean rows that nearly match an existing master record.
+// Each pair is stacked (cleaned above master) with the differing fields
+// highlighted so the reviewer can cross-verify, edit on the spot, and pick which
+// one is right.
+function ConflictReview({
+  conflicts,
+  columns,
+  resolutions,
+  setResolutions,
+  busy,
+  onCancel,
+  onConfirm,
+}) {
+  // On-the-spot corrections to the cleaned rows: { row_index: { column: value } }.
+  // These are saved as row corrections before the push, so the master dataset
+  // gets the edited values.
+  const [edits, setEdits] = useState({});
+
+  const setOne = (rowIndex, decision) =>
+    setResolutions((prev) => ({ ...prev, [rowIndex]: decision }));
+  const setAll = (decision) =>
+    setResolutions(Object.fromEntries(conflicts.map((c) => [c.row_index, decision])));
+
+  // The effective cleaned value for a cell — the reviewer's edit if any, else
+  // the originally cleaned value.
+  const cleanedVal = (c, col) => {
+    const e = edits[c.row_index]?.[col];
+    return e !== undefined ? e : c.cleaned[col] ?? "";
+  };
+  const setCell = (rowIndex, col, value) =>
+    setEdits((prev) => ({
+      ...prev,
+      [rowIndex]: { ...prev[rowIndex], [col]: value },
+    }));
+
+  return (
+    <div className="save-overlay">
+      <div className="conflict-modal">
+        <div className="conflict-head">
+          <div>
+            <h3>
+              <Icon name="alert" size={18} />
+              {conflicts.length} possible duplicate
+              {conflicts.length === 1 ? "" : "s"} found
+            </h3>
+            <p className="muted small">
+              These clean rows almost match a record already in the master
+              dataset. The cleaned row is shown above the existing master record —
+              the highlighted cells are what differ. Edit the cleaned values to fix
+              them on the spot, then tell us which is correct before saving.
+            </p>
+          </div>
+          <div className="conflict-bulk">
+            <span className="muted small">Apply to all:</span>
+            {CHOICES.map((ch) => (
+              <button
+                key={ch.key}
+                className="btn sm ghost"
+                onClick={() => setAll(ch.key)}
+                title={ch.hint}
+              >
+                {ch.label}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div className="conflict-body">
+          {conflicts.map((c) => {
+            const choice = resolutions[c.row_index] || "both";
+            // Live diff: a cell is highlighted while the (possibly edited)
+            // cleaned value still differs from the master value.
+            const isDiff = (col) => normVal(cleanedVal(c, col)) !== normVal(c.master[col]);
+            const liveDiffs = c.differences.filter(isDiff);
+            return (
+              <div className="conflict-card" key={c.row_index}>
+                <div className="conflict-card-head">
+                  <span className="conflict-badge">
+                    <Icon name="alert" size={14} />
+                    Possible duplicate
+                  </span>
+                  <span className="muted small">
+                    {liveDiffs.length} of {c.differences.length} field
+                    {c.differences.length === 1 ? "" : "s"} still differ
+                  </span>
+                </div>
+
+                {/* Quick scan of the differing fields — cleaned side is editable */}
+                <div className="conflict-diffs">
+                  <div className="conflict-diff-row conflict-diff-header">
+                    <span className="conflict-diff-field">Field</span>
+                    <span className="conflict-diff-cleaned">Cleaned (editable)</span>
+                    <span className="conflict-diff-master">In master dataset</span>
+                  </div>
+                  {c.differences.map((col) => (
+                    <div
+                      className={`conflict-diff-row${isDiff(col) ? "" : " resolved"}`}
+                      key={col}
+                    >
+                      <span className="conflict-diff-field">{col}</span>
+                      <span className="conflict-diff-cleaned">
+                        <input
+                          value={cleanedVal(c, col)}
+                          onChange={(e) => setCell(c.row_index, col, e.target.value)}
+                          placeholder="—"
+                        />
+                      </span>
+                      <span className="conflict-diff-master">
+                        {c.master[col] || "—"}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+
+                {/* Full records, stacked: cleaned on top, master below */}
+                <div className="conflict-table-wrap">
+                  <table className="conflict-table">
+                    <thead>
+                      <tr>
+                        <th className="rowlabel" />
+                        {columns.map((col) => (
+                          <th key={col} className={isDiff(col) ? "diff" : ""}>
+                            {col}
+                          </th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr className="cleaned-row">
+                        <th className="rowlabel">
+                          <span className="conflict-tag cleaned">Cleaned</span>
+                        </th>
+                        {columns.map((col) => (
+                          <td key={col} className={isDiff(col) ? "diff" : ""}>
+                            {cleanedVal(c, col) || "—"}
+                          </td>
+                        ))}
+                      </tr>
+                      <tr className="master-row">
+                        <th className="rowlabel">
+                          <span className="conflict-tag master">Master</span>
+                        </th>
+                        {columns.map((col) => (
+                          <td key={col} className={isDiff(col) ? "diff" : ""}>
+                            {c.master[col] || "—"}
+                          </td>
+                        ))}
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+
+                {/* Decision */}
+                <div className="conflict-choices">
+                  {CHOICES.map((ch) => (
+                    <button
+                      key={ch.key}
+                      className={`conflict-choice${choice === ch.key ? " active" : ""}`}
+                      onClick={() => setOne(c.row_index, ch.key)}
+                      title={ch.hint}
+                    >
+                      {ch.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+
+        <div className="conflict-foot">
+          <button className="btn sm" onClick={onCancel} disabled={busy}>
+            Cancel
+          </button>
+          <button
+            className="btn primary sm"
+            onClick={() => onConfirm(edits)}
+            disabled={busy}
+          >
+            <Icon name="check" size={15} />
+            Apply &amp; save
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
