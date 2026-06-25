@@ -730,14 +730,46 @@ export default function ReviewStep({ file, onCommitted }) {
     }
   }
 
-  async function exportFlagged() {
+  // A human-readable descriptor of exactly which filters are active, used to name
+  // the download so a folder of exports is self-explanatory — e.g.
+  // "Demo(needs_review_manually_corrected_singer_desc).xlsx".
+  function buildDownloadName() {
+    const slug = (s) =>
+      String(s).toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+    const parts = [];
+    if (view === "error") parts.push("needs_review");
+    else if (view === "clean") parts.push("clean");
+    else parts.push("all_rows");
+    if (activeTag) parts.push(tagLabel[activeTag] || activeTag);
+    activeTags.forEach((t) => parts.push(tagLabel[t] || t));
+    if (sortCol) parts.push(`${sortCol}_${sortDir}`);
+    if (containsCol && containsVal) parts.push(`${containsCol}_${containsVal}`);
+    const descriptor = parts.map(slug).filter(Boolean).join("_");
+    const base =
+      slug((file.original_name || "file").replace(/\.[^.]+$/, "")) || "file";
+    return `${base}(${descriptor}).xlsx`;
+  }
+
+  // Download exactly what the grid is showing: same view + tag + filters + sort,
+  // so e.g. "All rows sorted by Singer descending" or "Clean rows containing one
+  // singer" come out of Excel matching the screen. No paging — every matching row.
+  async function downloadFiltered() {
     setExporting(true);
     setError("");
     try {
-      await download(
-        `/api/files/${file.id}/export?view=error`,
-        `flagged_rows_${file.id}.xlsx`
-      );
+      const name = buildDownloadName();
+      const qs = new URLSearchParams({ view, filename: name });
+      if (activeTag) qs.set("tag", activeTag);
+      if (activeTags.length) qs.set("tags", activeTags.join(","));
+      if (sortCol) {
+        qs.set("sort", sortCol);
+        qs.set("dir", sortDir);
+      }
+      if (containsCol && containsVal) {
+        qs.set("contains_col", containsCol);
+        qs.set("contains_val", containsVal);
+      }
+      await download(`/api/files/${file.id}/export?${qs.toString()}`, name);
     } catch (err) {
       setError(err.message);
     } finally {
@@ -905,45 +937,38 @@ export default function ReviewStep({ file, onCommitted }) {
         </div>
       </div>
 
-      {/* View tabs + Filters (on the right) */}
+      {/* View tabs + Filters (grouped left), Download (right) */}
       <div className="view-bar">
-        <div className="view-tabs">
-          <button className={view === "all" ? "active" : ""} onClick={() => switchView("all")}>
-            All rows
-          </button>
-          <button className={view === "error" ? "active" : ""} onClick={() => switchView("error")}>
-            Needs review ({errorsLeft})
-          </button>
-          <button className={view === "clean" ? "active" : ""} onClick={() => switchView("clean")}>
-            Clean ({summary?.clean ?? 0})
+        <div className="view-left">
+          <div className="view-tabs">
+            <button className={view === "all" ? "active" : ""} onClick={() => switchView("all")}>
+              All rows
+            </button>
+            <button className={view === "error" ? "active" : ""} onClick={() => switchView("error")}>
+              Needs review ({errorsLeft})
+            </button>
+            <button className={view === "clean" ? "active" : ""} onClick={() => switchView("clean")}>
+              Clean ({summary?.clean ?? 0})
+            </button>
+          </div>
+          <button className="btn sm filter-btn" onClick={openFilters}>
+            <Icon name="filter" size={14} />
+            Filters
+            {(activeTags.length > 0 || sortCol) && (
+              <span className="filter-n">{activeTags.length + (sortCol ? 1 : 0)}</span>
+            )}
           </button>
         </div>
-        <button className="btn sm filter-btn" onClick={openFilters}>
-          <Icon name="filter" size={14} />
-          Filters
-          {(activeTags.length > 0 || sortCol) && (
-            <span className="filter-n">{activeTags.length + (sortCol ? 1 : 0)}</span>
-          )}
+        <button
+          className="btn sm primary"
+          onClick={downloadFiltered}
+          disabled={exporting || total === 0}
+          title="Download these rows (current view, filters and sort) as Excel"
+        >
+          <Icon name="download" size={14} />
+          {exporting ? "Exporting…" : "Download Excel"}
         </button>
       </div>
-
-      {/* Export the flagged rows — pull every row that needs review into Excel,
-          or keep editing inline below. */}
-      {view === "error" && (
-        <div className="export-bar">
-          <span className="muted small">
-            Export every flagged row to Excel, or fix them inline below.
-          </span>
-          <button
-            className="btn sm"
-            onClick={exportFlagged}
-            disabled={exporting || (summary?.errors ?? 0) === 0}
-          >
-            <Icon name="download" size={15} />
-            {exporting ? "Exporting…" : "Export to Excel"}
-          </button>
-        </div>
-      )}
 
       {/* Colour-coded error legend + bulk fixer */}
       {view === "error" && summary && summary.tags.length > 0 && (

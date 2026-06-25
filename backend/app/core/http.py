@@ -4,7 +4,9 @@ import re
 from urllib.parse import quote
 
 # Anything that isn't a safe filename char (or could break out of the header).
-_UNSAFE = re.compile(r'[^A-Za-z0-9._ -]+')
+# Parentheses are allowed so a caller-supplied descriptor like
+# "Demo(manually_edited_singers)" survives intact.
+_UNSAFE = re.compile(r'[^A-Za-z0-9._ ()-]+')
 
 
 def safe_filename(name: str, fallback: str = "download.xlsx") -> str:

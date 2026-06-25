@@ -2623,6 +2623,13 @@ input::placeholder {
 .view-bar .view-tabs {
   margin-bottom: 0;
 }
+/* Keep Filters tucked right next to the view tabs, not floated away. */
+.view-left {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
 .filter-btn {
   flex: none;
 }

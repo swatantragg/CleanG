@@ -20,7 +20,7 @@ from ..core.cleaning import (
     mark_duplicates,
     revalidate,
 )
-from ..core.http import content_disposition
+from ..core.http import content_disposition, safe_filename
 from ..core.master_store import find_conflicts, upsert_master_records
 from ..database import get_db
 from ..deps import get_current_user
@@ -722,17 +722,27 @@ def export_rows(
     file_id: int,
     view: str = "error",
     tag: str | None = None,
+    tags: str | None = None,
+    sort: str | None = None,
+    dir: str = "asc",
+    contains_col: str | None = None,
+    contains_val: str | None = None,
+    filename: str | None = None,
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    """Download the rows of a given view as an .xlsx workbook.
+    """Download the currently-filtered rows as an .xlsx workbook.
 
-    Defaults to the flagged ("error") rows so a reviewer can pull every row that
-    needs attention into Excel, each annotated with what's wrong. The sheet is
-    built in memory and streamed — nothing is written to disk.
+    Honors the exact same view/tag/tags/sort/value-filter the Review grid is
+    showing, so "download" gives the user the very set of rows in front of them
+    (e.g. all rows sorted by Singer descending, or only rows containing one
+    singer). The sheet is built in memory and streamed — nothing hits disk.
     """
     f = _get_file_or_404(file_id, user, db)
-    rows = _filter_rows(build_rows(f), view, tag)
+    rows = _filter_rows(
+        build_rows(f), view, tag, _split_csv(tags), contains_col, contains_val
+    )
+    rows = _sort_rows(rows, sort, dir)
     cols = _active_columns(f)
 
     wb = Workbook()
@@ -750,12 +760,24 @@ def export_rows(
     buf = io.BytesIO()
     wb.save(buf)
     buf.seek(0)
-    label = "flagged_rows" if view == "error" else f"{view}_rows"
-    filename = f"{label}_file{file_id}.xlsx"
+    # Prefer the caller's descriptive name (built from the human-readable filter
+    # labels on the client, e.g. "Demo(manually_edited_singers).xlsx"); otherwise
+    # fall back to a self-explanatory default describing the view/sort/value.
+    if filename:
+        out_name = safe_filename(filename)
+        if not out_name.lower().endswith(".xlsx"):
+            out_name += ".xlsx"
+    else:
+        parts = ["flagged_rows" if view == "error" else f"{view}_rows"]
+        if sort:
+            parts.append(f"by_{sort}_{dir}")
+        if contains_col and contains_val:
+            parts.append(f"{contains_col}_{contains_val}")
+        out_name = safe_filename("_".join(parts) + f"_file{file_id}.xlsx")
     return StreamingResponse(
         buf,
         media_type=_XLSX_MIME,
-        headers={"Content-Disposition": content_disposition(filename)},
+        headers={"Content-Disposition": content_disposition(out_name)},
     )
 
 
