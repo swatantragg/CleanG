@@ -1,13 +1,28 @@
 services:
   backend:
     build: ./backend
-    env_file: ./backend/.env
+    # Config comes from the deployment platform's environment (Coolify UI),
+    # interpolated below. NOTE: backend/.env is gitignored and absent on a clean
+    # clone, so it is deliberately NOT referenced here — relying on it would make
+    # the deploy depend on a file the repo doesn't ship.
     environment:
+      # --- Required (startup aborts if unset / placeholder / too short) ---
+      DATABASE_URL: ${DATABASE_URL}
+      SECRET_KEY: ${SECRET_KEY}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD}
+      # --- Bootstrap admin + token lifetime ---
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-admin@example.com}
+      ADMIN_NAME: ${ADMIN_NAME:-Administrator}
+      ACCESS_TOKEN_EXPIRE_MINUTES: ${ACCESS_TOKEN_EXPIRE_MINUTES:-60}
       # Frontend is served same-origin via nginx, but keep CORS explicit.
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173}
       # Keep true in production (HTTPS). Set COOKIE_SECURE=false only when
       # serving the app over plain HTTP from a non-localhost host.
       COOKIE_SECURE: ${COOKIE_SECURE:-true}
+      # Host-header allowlist + shared rate-limit store (optional but recommended
+      # in production). Defaults keep single-host / single-worker dev working.
+      TRUSTED_HOSTS: ${TRUSTED_HOSTS:-*}
+      REDIS_URL: ${REDIS_URL:-}
     # The API is NOT published to the host: it is reachable only on the internal
     # compose network, exclusively through the nginx reverse proxy (which adds the
     # CSP, the 20 MB upload cap and the served security headers). Publishing it
@@ -26,6 +41,9 @@ services:
     build: ./frontend
     depends_on:
       - backend
-    ports:
-      - "5173:80"
+    # Coolify's reverse proxy (Traefik) routes the app's FQDN to this container
+    # on port 80. Do NOT publish a fixed host port — it conflicts with whatever
+    # already holds the port on the host and bypasses the proxy / TLS.
+    expose:
+      - "80"
     restart: unless-stopped
