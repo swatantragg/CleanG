@@ -12,7 +12,7 @@ openpyxl==3.1.5
 pandas==2.2.3
 slowapi==0.1.9
 # Optional Redis backend for the shared rate limiter (set REDIS_URL to enable).
-redis==5.2.1
+redis==8.0.1
 # Daily-report scheduler. tzdata ships the IANA tz database so "Asia/Kolkata"
 # resolves inside the slim image (which has no system zoneinfo).
 APScheduler==3.10.4
