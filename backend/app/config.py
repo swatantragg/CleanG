@@ -18,7 +18,7 @@ _PLACEHOLDER_SECRETS = {
 # report runs and WHO receives it is fixed here.
 REPORT_RECIPIENTS: list[str] = [
     "rahul.musicrightsmanagement@gmail.com",
-    "swatantra.musicrightsmanagement@gmail.com",
+    "swatantra.goongoonalo@gmail.com",
     "sherley@musicrightsmanagementindia.com",
     "devi@musicrightsmanagementindia.com",
     "vishal@musicrightsmanagementindia.com",

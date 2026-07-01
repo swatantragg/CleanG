@@ -105,6 +105,13 @@ export default function Export() {
   const [verifying, setVerifying] = useState(false);
   const [verifyResult, setVerifyResult] = useState(null);
 
+  // Read-only preview of the (filtered) master data — just a view of the rows.
+  const PREVIEW_PAGE_SIZE = 25;
+  const [preview, setPreview] = useState({ columns: [], rows: [], total: 0 });
+  const [previewPage, setPreviewPage] = useState(0);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [previewErr, setPreviewErr] = useState("");
+
   useEffect(() => {
     (async () => {
       try {
@@ -220,6 +227,53 @@ export default function Export() {
     }
   }
 
+  // Re-fetch the preview when the filters or the chosen columns change (debounced).
+  // Serialised into a key so array/object identity churn doesn't over-fire.
+  const previewKey = useMemo(
+    () => JSON.stringify({ f: filters, c: resolved }),
+    [filters, resolved]
+  );
+  // A filter/column change returns the preview to page 1.
+  useEffect(() => {
+    setPreviewPage(0);
+  }, [previewKey]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const t = setTimeout(async () => {
+      setPreviewLoading(true);
+      setPreviewErr("");
+      try {
+        const cleanFilters = Object.fromEntries(
+          Object.entries(filters).filter(([, v]) => v.length)
+        );
+        const res = await api("/api/master/preview", {
+          method: "POST",
+          body: {
+            filters: cleanFilters,
+            columns: resolved,
+            limit: PREVIEW_PAGE_SIZE,
+            offset: previewPage * PREVIEW_PAGE_SIZE,
+          },
+        });
+        if (!cancelled) setPreview(res);
+      } catch (e) {
+        if (!cancelled) setPreviewErr(e.message);
+      } finally {
+        if (!cancelled) setPreviewLoading(false);
+      }
+    }, 250);
+    return () => {
+      cancelled = true;
+      clearTimeout(t);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [previewKey, previewPage]);
+
+  const previewFrom = preview.total === 0 ? 0 : previewPage * PREVIEW_PAGE_SIZE + 1;
+  const previewTo = Math.min((previewPage + 1) * PREVIEW_PAGE_SIZE, preview.total);
+  const previewMaxPage = Math.max(0, Math.ceil(preview.total / PREVIEW_PAGE_SIZE) - 1);
+
   const MODES = [
     { key: "PDL", title: "PDL + Custom", desc: "PDL preset columns, plus any extras you add." },
     { key: "SVF", title: "SVF + Custom", desc: "SVF preset columns, plus any extras you add." },
@@ -245,7 +299,10 @@ export default function Export() {
             column set), optionally narrow the rows, then download as Excel.
           </p>
         </div>
-        <span className="muted small">{options?.total_records ?? 0} records in master</span>
+        <div className="master-stat" title="Total cleaned records stored in the master dataset">
+          <span className="master-stat-num">{options?.total_records ?? 0}</span>
+          <span className="master-stat-label">rows in master data</span>
+        </div>
       </div>
 
       {error && (
@@ -321,6 +378,107 @@ export default function Export() {
           )}
         </div>
       )}
+
+      {/* Read-only preview of the (filtered) master data */}
+      <div className="card">
+        <div className="preview-head">
+          <h3 className="sec-title">
+            Preview <span className="muted small">· read-only view of the master data</span>
+          </h3>
+          <div className="preview-meta">
+            {previewLoading ? (
+              <span className="muted small">Loading…</span>
+            ) : (
+              <span className="muted small">
+                {preview.total > 0
+                  ? `Showing ${previewFrom}–${previewTo} of ${preview.total} row${
+                      preview.total === 1 ? "" : "s"
+                    }`
+                  : "No matching rows"}
+                {hasFilters ? " (filtered)" : ""}
+              </span>
+            )}
+            <button
+              className="btn download-preview-btn"
+              onClick={runExport}
+              disabled={busy || resolved.length === 0 || preview.total === 0}
+              title={
+                resolved.length === 0
+                  ? "Choose at least one column below"
+                  : "Download these rows as Excel"
+              }
+            >
+              <Icon name="download" size={15} />
+              {busy ? "Downloading…" : "Download Excel"}
+            </button>
+          </div>
+        </div>
+
+        {previewErr && (
+          <div className="alert"><Icon name="alert" size={16} /> {previewErr}</div>
+        )}
+
+        <div className="preview-table-wrap">
+          <table className="table preview-table">
+            <thead>
+              <tr>
+                <th className="preview-idx">#</th>
+                {preview.columns.map((c) => (
+                  <th key={c}>{c}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {preview.rows.length === 0 ? (
+                <tr>
+                  <td
+                    className="muted"
+                    colSpan={preview.columns.length + 1}
+                    style={{ textAlign: "center", padding: "1.5rem" }}
+                  >
+                    {previewLoading ? "Loading…" : "No rows to show."}
+                  </td>
+                </tr>
+              ) : (
+                preview.rows.map((row, i) => (
+                  <tr key={i}>
+                    <td className="preview-idx">
+                      {previewPage * PREVIEW_PAGE_SIZE + i + 1}
+                    </td>
+                    {preview.columns.map((c) => (
+                      <td key={c} title={row[c] || ""}>
+                        {row[c] || <span className="muted">—</span>}
+                      </td>
+                    ))}
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
+
+        {preview.total > PREVIEW_PAGE_SIZE && (
+          <div className="preview-pager">
+            <button
+              className="btn sm"
+              disabled={previewPage === 0 || previewLoading}
+              onClick={() => setPreviewPage((p) => Math.max(0, p - 1))}
+            >
+              <Icon name="arrowLeft" size={14} /> Prev
+            </button>
+            <span className="muted small">
+              Page {previewPage + 1} of {previewMaxPage + 1}
+            </span>
+            <button
+              className="btn sm"
+              disabled={previewPage >= previewMaxPage || previewLoading}
+              onClick={() => setPreviewPage((p) => Math.min(previewMaxPage, p + 1))}
+            >
+              Next <Icon name="arrowRight" size={14} />
+            </button>
+          </div>
+        )}
+      </div>
 
       {/* 2 — Choose the export shape */}
       <div className={`card ${canProceed ? "" : "section-locked"}`}>
@@ -433,6 +591,7 @@ export default function Export() {
           {busy ? "Exporting…" : "Export to Excel"}
         </button>
       </div>
+
     </section>
   );
 }

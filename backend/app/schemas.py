@@ -191,6 +191,16 @@ class ExportRequest(BaseModel):
     sheet_name: Annotated[str, Field(max_length=100)] | None = None
 
 
+class PreviewRequest(BaseModel):
+    """A read-only, paginated look at the (optionally filtered) master data."""
+
+    filters: FilterMap = {}
+    # Columns to show; empty = every master column, in canonical order.
+    columns: Annotated[list[ShortText], Field(max_length=100)] = []
+    limit: Annotated[int, Field(ge=1, le=200)] = 25
+    offset: Annotated[int, Field(ge=0)] = 0
+
+
 class VerifyRequest(BaseModel):
     filters: FilterMap = {}
 

@@ -37,6 +37,7 @@ from ..schemas import (
     FilterField,
     MasterColumnOut,
     MasterDataPage,
+    PreviewRequest,
     SuggestionOut,
     VerifyRequest,
     VerifyResult,
@@ -230,6 +231,37 @@ def suggest_values(
     # Most common spelling first — it's the one the user most likely wants.
     out.sort(key=lambda s: (-s.count, s.value.lower()))
     return out
+
+
+@router.post("/preview", response_model=MasterDataPage)
+def preview_master(
+    payload: PreviewRequest,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """A read-only, paginated view of the (optionally filtered) master data.
+
+    Same filtering semantics as export, but returns rows as JSON for on-screen
+    display instead of streaming an xlsx. Purely a read — nothing is modified."""
+    if payload.columns:
+        cols = [c for c in payload.columns if c in MASTER_COLUMN_TO_ATTR]
+    else:
+        cols = list(MASTER_COLUMN_TO_ATTR)
+    if not cols:
+        cols = list(MASTER_COLUMN_TO_ATTR)
+
+    base = _filtered_query(payload.filters, user)
+    total = db.scalar(
+        select(func.count()).select_from(base.subquery())
+    ) or 0
+    recs = db.scalars(
+        base.order_by(MasterData.id).offset(payload.offset).limit(payload.limit)
+    ).all()
+    return MasterDataPage(
+        columns=cols,
+        rows=[record_to_dict(r, cols) for r in recs],
+        total=total,
+    )
 
 
 @router.post("/verify", response_model=VerifyResult)
