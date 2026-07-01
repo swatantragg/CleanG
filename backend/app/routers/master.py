@@ -103,14 +103,15 @@ def _filtered_query(filters: dict[str, list[str]], user: User):
 _XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
 
-def _attr(col: str) -> str:
-    """Master column name -> MasterData attribute, or 422 if unknown."""
-    attr = MASTER_COLUMN_TO_ATTR.get(col)
-    if attr is None:
-        raise HTTPException(
-            status.HTTP_422_UNPROCESSABLE_ENTITY, f"Unknown column: {col!r}"
-        )
-    return attr
+def _custom_column_names(db: Session) -> list[str]:
+    """User-added custom column names, in schema order. Their values are NOT
+    stored in a dedicated MasterData attribute but inside the `extras` JSON bag,
+    so they're resolved from there on read/export."""
+    return list(db.scalars(
+        select(MasterColumn.name)
+        .where(MasterColumn.custom.is_(True))
+        .order_by(MasterColumn.position)
+    ).all())
 
 settings = get_settings()
 router = APIRouter(prefix="/api/master", tags=["master"])
@@ -173,11 +174,28 @@ def export_options(
 ):
     """Everything the Export tab needs: presets (with their appendable custom
     columns), the full column list for a fully-custom export, and the fields the
-    user can pre-filter on."""
+    user can pre-filter on.
+
+    User-added custom columns (stored in each record's `extras` bag) are folded in
+    too: they extend the fully-custom column list AND become appendable extras on
+    every preset (PDL / SVF), so any extra column captured at upload can be
+    exported alongside the built-in schema."""
     total = _scoped_count(db, user)
+    custom_cols = _custom_column_names(db)
+    all_columns = list(ALL_COLUMNS) + [c for c in custom_cols if c not in ALL_COLUMNS]
+    presets = []
+    for p in preset_payload():
+        appendable = list(p["custom_columns"]) + [
+            c for c in custom_cols
+            if c not in p["columns"] and c not in p["custom_columns"]
+        ]
+        presets.append(ExportPreset(
+            key=p["key"], label=p["label"], columns=p["columns"],
+            custom_columns=appendable,
+        ))
     return ExportOptions(
-        presets=[ExportPreset(**p) for p in preset_payload()],
-        all_columns=list(ALL_COLUMNS),
+        presets=presets,
+        all_columns=all_columns,
         filter_fields=[
             FilterField(key=label, label=label, columns=cols)
             for label, cols in FILTER_FIELDS
@@ -331,17 +349,34 @@ def export_master(
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_ENTITY, "Select at least one column to export."
         )
-    # Validate + resolve every requested column up front.
-    cols = [(c, _attr(c)) for c in payload.columns]
+    # Validate + resolve every requested column up front. Built-in columns read
+    # from a real MasterData attribute; user-added custom columns read from the
+    # record's `extras` JSON bag. Anything else is rejected.
+    custom = set(_custom_column_names(db))
+    cols: list[tuple[str, str, bool]] = []  # (column, key, from_extras)
+    for c in payload.columns:
+        attr = MASTER_COLUMN_TO_ATTR.get(c)
+        if attr is not None:
+            cols.append((c, attr, False))
+        elif c in custom:
+            cols.append((c, c, True))
+        else:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY, f"Unknown column: {c!r}"
+            )
     stmt = _filtered_query(payload.filters, user).order_by(MasterData.id)
 
     wb = Workbook()
     ws = wb.active
     ws.title = (payload.sheet_name or "Master data")[:31]
-    ws.append([c for c, _ in cols])
+    ws.append([c for c, _, _ in cols])
     n = 0
     for rec in db.scalars(stmt):
-        ws.append([getattr(rec, attr) or "" for _, attr in cols])
+        extras = rec.extras or {}
+        ws.append([
+            (extras.get(key, "") if from_extras else getattr(rec, key)) or ""
+            for _, key, from_extras in cols
+        ])
         n += 1
 
     log_event(db, request, "master_export", user=user,

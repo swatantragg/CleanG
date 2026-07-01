@@ -2129,6 +2129,16 @@ input::placeholder {
   padding: 0;
 }
 
+.checklist-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+.checklist-head .link-btn {
+  margin-left: 0;
+}
+
 .pager {
   display: flex;
   align-items: center;

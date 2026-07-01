@@ -545,7 +545,22 @@ export default function Export() {
         {mode === "CUSTOM" && (
           <div className="preset-config">
             <div className="preset-extra">
-              <span className="muted small">Pick the columns to export ({customCols.size} selected)</span>
+              <div className="checklist-head">
+                <span className="muted small">Pick the columns to export ({customCols.size} selected)</span>
+                <button
+                  type="button"
+                  className="link-btn small"
+                  onClick={() =>
+                    setCustomCols(
+                      customCols.size === allColumns.length
+                        ? new Set()
+                        : new Set(allColumns)
+                    )
+                  }
+                >
+                  {customCols.size === allColumns.length ? "Clear all" : "Select all"}
+                </button>
+              </div>
               <div className="col-checklist">
                 {allColumns.map((c) => {
                   const checked = customCols.has(c);
