@@ -156,9 +156,41 @@ def init_db() -> None:
         db.close()
 
 
+async def _init_db_with_retry() -> None:
+    """Run init_db(), retrying a transient database outage instead of wedging.
+
+    A short database blip at boot used to hang the startup lifespan forever (no
+    connect timeout), leaving the API permanently returning 502 even after the
+    database recovered — a manual restart was the only way out. With a bounded
+    connect timeout, each attempt now fails fast; we retry with backoff so a brief
+    outage is ridden out in-process, and only a sustained outage lets the process
+    exit so the orchestrator (restart: unless-stopped) restarts it cleanly.
+    """
+    import asyncio
+    import logging
+
+    from sqlalchemy.exc import DBAPIError, OperationalError
+
+    log = logging.getLogger("uvicorn.error")
+    attempts = int(os.getenv("DB_INIT_ATTEMPTS", "8"))
+    for i in range(1, attempts + 1):
+        try:
+            await asyncio.to_thread(init_db)
+            return
+        except (OperationalError, DBAPIError) as exc:
+            if i == attempts:
+                log.error("Database unreachable after %d attempts; giving up so "
+                          "the orchestrator can restart the process.", attempts)
+                raise
+            delay = min(2.0 * 2 ** (i - 1), 20.0)
+            log.warning("init_db attempt %d/%d failed (%s); retrying in %.0fs",
+                        i, attempts, type(exc).__name__, delay)
+            await asyncio.sleep(delay)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    init_db()
+    await _init_db_with_retry()
     start_scheduler()  # daily report email (10:30 IST by default)
     try:
         yield

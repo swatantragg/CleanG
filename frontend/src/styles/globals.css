@@ -2685,6 +2685,26 @@ input::placeholder {
   user-select: none;
 }
 
+/* Build/version stamp — bottom-right of every page, stacked just above the
+   "Developed By" badge so the two don't overlap. */
+.version-badge {
+  position: fixed;
+  right: 12px;
+  bottom: 40px;
+  z-index: 80;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  color: var(--muted-2);
+  background: var(--surface-glass);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 0.2rem 0.6rem;
+  backdrop-filter: blur(4px);
+  pointer-events: none;
+  user-select: none;
+}
+
 /* ============================================================
    Review — filters, column header menu, unique panel, modals
    ============================================================ */

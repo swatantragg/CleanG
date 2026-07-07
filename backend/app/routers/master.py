@@ -361,12 +361,15 @@ def export_master(
         cols.append((c, attr))
     stmt = _filtered_query(payload.filters, user).order_by(MasterData.id)
 
-    wb = Workbook()
-    ws = wb.active
-    ws.title = (payload.sheet_name or "Master data")[:31]
+    # write_only + yield_per streams records straight to the .xlsx zip instead of
+    # materialising a styled cell object per value and every ORM row at once, so an
+    # export of the full master dataset (100k+ rows) completes in seconds with a few
+    # MB of memory rather than timing out / exhausting RAM.
+    wb = Workbook(write_only=True)
+    ws = wb.create_sheet((payload.sheet_name or "Master data")[:31])
     ws.append([c for c, _ in cols])
     n = 0
-    for rec in db.scalars(stmt):
+    for rec in db.scalars(stmt.execution_options(yield_per=1000)):
         ws.append([getattr(rec, attr) or "" for _, attr in cols])
         n += 1
 
