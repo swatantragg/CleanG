@@ -5,6 +5,7 @@ from collections import Counter
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
 from openpyxl import Workbook
+from openpyxl.cell import WriteOnlyCell
 from openpyxl.comments import Comment
 from openpyxl.styles import Font, PatternFill
 from sqlalchemy import select
@@ -232,9 +233,76 @@ def _entry(f: UploadedFile) -> dict:
 
     if len(_CACHE) >= _CACHE_LIMIT:
         _CACHE.pop(next(iter(_CACHE)))
-    entry = {"sig": sig, "rows": rows, "summary": None, "profile": None}
+    # `base_values` is the pre-overlay cleaned value dict for EVERY data row (keyed
+    # by original index). It lets a later single/batch edit or artist merge re-clean
+    # only the changed rows (see _edit_in_place) instead of re-cleaning the whole
+    # file — captured before mark_duplicates, which only touches issues, not values.
+    entry = {
+        "sig": sig,
+        "rows": rows,
+        "summary": None,
+        "profile": None,
+        "base_values": {r.index: r.values for r in base},
+    }
     _CACHE[f.id] = entry
     return entry
+
+
+def _warm_base_values(f: UploadedFile) -> dict | None:
+    """The cached per-row base values if the file's clean cache is warm, else None.
+
+    Warm access means an edit can validate its row index and recompute in place
+    without loading the (large, possibly remote) `data` blob at all."""
+    e = _CACHE.get(f.id)
+    if e and e.get("base_values") is not None:
+        return e["base_values"]
+    return None
+
+
+def _edit_in_place(f: UploadedFile, changed: set[int]) -> bool:
+    """Recompute only the `changed` rows in the warm cache after their corrections
+    were updated, instead of re-cleaning the entire file.
+
+    Returns False if the cache is cold or in an unexpected state, so the caller
+    falls back to a full invalidate + rebuild — always correct, just slower. This
+    is the hot path for inline edits and artist merges on large files: it avoids
+    both the ~1s whole-file re-clean and the multi-MB data-blob reload from the
+    (remote) database that a full rebuild would trigger on the next request.
+    """
+    if not changed:
+        return True  # nothing to recompute; the warm cache is already consistent
+    entry = _CACHE.get(f.id)
+    if not entry or entry.get("base_values") is None:
+        return False
+    base_values: dict = entry["base_values"]
+    corrections = f.corrections or {}
+    dropped = set(f.dropped or [])
+    accepted = set(f.accepted or [])
+    rows: list[CleanRow] = entry["rows"]
+    pos = {r.index: k for k, r in enumerate(rows)}
+
+    for idx in changed:
+        bv = base_values.get(idx)
+        override = corrections.get(str(idx))
+        # An edit always writes an override for a row that's present (not dropped).
+        # Anything else is unexpected -> bail to the safe full-rebuild path.
+        if bv is None or override is None or idx in dropped or idx not in pos:
+            return False
+        cleaned, issues = revalidate({**bv, **override})
+        issues = _mark_corrected(bv, cleaned, issues, override)
+        rows[pos[idx]] = CleanRow(index=idx, values=cleaned, issues=issues)
+
+    # An edit can change cross-row duplicate flags; re-run the cheap (no-DB) pass.
+    mark_duplicates(rows)
+    # Preserve the "keep as-is" decisions (accepted rows keep their errors cleared).
+    if accepted:
+        for r in rows:
+            if r.index in accepted:
+                r.issues = [i for i in r.issues if i["action"] != "error"]
+    entry["sig"] = _signature(f)
+    entry["summary"] = None
+    entry["profile"] = None
+    return True
 
 
 def build_rows(f: UploadedFile) -> list[CleanRow]:
@@ -725,6 +793,7 @@ def remap_column_value(
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Nothing to remap.")
 
     corrections = dict(f.corrections or {})
+    changed: set[int] = set()
     for r in build_rows(f):
         cur = r.values.get(column, "")
         new = _remap_cell(column, cur, alias)
@@ -732,9 +801,12 @@ def remap_column_value(
             override = dict(corrections.get(str(r.index), {}))
             override[column] = new
             corrections[str(r.index)] = override
+            changed.add(r.index)
     f.corrections = corrections
     db.commit()
-    _invalidate(file_id)
+    # Recompute only the rows the merge rewrote; full rebuild only if cache is cold.
+    if not _edit_in_place(f, changed):
+        _invalidate(file_id)
     return _review_payload(
         f, view, tag, page, page_size, include_profile,
         tags=_split_csv(tags), sort=sort, direction=dir,
@@ -825,28 +897,38 @@ def _cell_review(r: "CleanRow") -> tuple[dict[str, str], dict[str, str], str]:
 def _write_review_sheet(ws, rows: list["CleanRow"], cols: list[str]) -> None:
     """Second workbook sheet: the same rows as the export, but with every cell a
     human touched highlighted yellow and every unresolved error highlighted red,
-    plus an "Issue" column spelling out precisely what was resolved per cell."""
-    header = ["Row", *cols, "Issue"]
-    ws.append(header)
-    for cell in ws[1]:
+    plus an "Issue" column spelling out precisely what was resolved per cell.
+
+    Streamed via a write-only worksheet (`ws` from a write_only Workbook) so even a
+    six-figure-row file is produced in seconds with a few MB of memory — styled
+    cells are `WriteOnlyCell`s built inline (random-access `ws.cell()` is not
+    available in write-only mode)."""
+    ws.freeze_panes = "A2"  # write-only: must be set before the first append
+    header = []
+    for value in ("Row", *cols, "Issue"):
+        cell = WriteOnlyCell(ws, value=value)
         cell.font = _HEADER_FONT
-    ws["1"][len(header) - 1].comment = Comment(
+        header.append(cell)
+    header[-1].comment = Comment(
         "Yellow = manually corrected by a reviewer (e.g. artist renamed/merged).\n"
         "Red = error still unresolved.",
         "Cleanser",
     )
-    # 1-based column index of each data column (Row is col 1, data starts at col 2).
-    col_pos = {c: idx + 2 for idx, c in enumerate(cols)}
+    ws.append(header)
     for r in rows:
         edited, errored, issue_text = _cell_review(r)
-        ws.append([r.index + 1, *[r.values.get(c, "") for c in cols], issue_text])
-        row_no = ws.max_row
-        for col, pos in col_pos.items():
-            if col in errored:
-                ws.cell(row=row_no, column=pos).fill = _FILL_ERROR
-            elif col in edited:
-                ws.cell(row=row_no, column=pos).fill = _FILL_EDITED
-    ws.freeze_panes = "A2"
+        line = [r.index + 1]
+        for col in cols:
+            value = r.values.get(col, "")
+            fill = _FILL_ERROR if col in errored else _FILL_EDITED if col in edited else None
+            if fill is not None:
+                cell = WriteOnlyCell(ws, value=value)
+                cell.fill = fill
+                line.append(cell)
+            else:
+                line.append(value)  # plain value -> no per-cell object overhead
+        line.append(issue_text)
+        ws.append(line)
 
 
 @router.get("/api/files/{file_id}/export")
@@ -879,10 +961,13 @@ def export_rows(
     rows = _sort_rows(rows, sort, dir)
     cols = _active_columns(f)
 
-    wb = Workbook()
-    # Sheet 1 — the plain export we already ship (unchanged).
-    ws = wb.active
-    ws.title = "Flagged rows" if view == "error" else "Rows"
+    # write_only streams rows straight to the zip: a 15k-row export drops from
+    # ~60s / ~130 MB (the default Workbook builds a styled object per cell, which
+    # blew past the 60s proxy timeout — the reported "can't download") to ~3s / a
+    # few MB, and scales to six-figure row counts well under any gateway timeout.
+    wb = Workbook(write_only=True)
+    # Sheet 1 — the plain export we already ship.
+    ws = wb.create_sheet("Flagged rows" if view == "error" else "Rows")
     ws.append(["Row", *cols, "Issues"])
     for r in rows:
         issues = "; ".join(
@@ -930,7 +1015,13 @@ def edit_row(
 ):
     """Human edit: store the changed cells as a correction and re-clean the row."""
     f = _get_file_or_404(file_id, user, db)
-    if not (0 <= row_index < len(f.data)):
+    # Bounds-check against the warm cache (all row indices) when possible, so a
+    # single edit doesn't force a reload of the whole data blob just to read len().
+    base_values = _warm_base_values(f)
+    if base_values is not None:
+        if row_index not in base_values:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Row not found")
+    elif not (0 <= row_index < len(f.data)):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Row not found")
 
     corrections = dict(f.corrections or {})
@@ -939,7 +1030,9 @@ def edit_row(
     corrections[str(row_index)] = existing
     f.corrections = corrections
     db.commit()
-    _invalidate(file_id)
+    # Recompute just this row in place; fall back to a full rebuild if cache is cold.
+    if not _edit_in_place(f, {row_index}):
+        _invalidate(file_id)
 
     for r in build_rows(f):
         if r.index == row_index:
@@ -972,20 +1065,30 @@ def edit_rows(
     """
     f = _get_file_or_404(file_id, user, db)
     corrections = dict(f.corrections or {})
-    n = len(f.data)
+    # Validate indices against the warm cache when possible (avoids loading the
+    # data blob just to read its length); fall back to len(data) if cache is cold.
+    base_values = _warm_base_values(f)
+    n = len(base_values) if base_values is not None else len(f.data)
+    changed: set[int] = set()
     for idx_str, values in payload.edits.items():
         try:
             idx = int(idx_str)
         except (TypeError, ValueError):
             continue
-        if not (0 <= idx < n):
+        if base_values is not None:
+            if idx not in base_values:
+                continue
+        elif not (0 <= idx < n):
             continue
         existing = dict(corrections.get(idx_str, {}))
         existing.update(values)
         corrections[idx_str] = existing
+        changed.add(idx)
     f.corrections = corrections
     db.commit()
-    _invalidate(file_id)
+    # Recompute only the edited rows in place; full rebuild only if cache is cold.
+    if not _edit_in_place(f, changed):
+        _invalidate(file_id)
     return _review_payload(
         f, view, tag, page, page_size, include_profile,
         tags=_split_csv(tags), sort=sort, direction=dir,
