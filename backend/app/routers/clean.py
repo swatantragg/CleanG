@@ -54,6 +54,7 @@ from ..schemas import (
     RowEdit,
     RowsAccept,
     RowsBatchEdit,
+    RowsRevert,
     TagGroup,
     UniqueValue,
     UniqueValuesOut,
@@ -261,7 +262,8 @@ def _warm_base_values(f: UploadedFile) -> dict | None:
 
 def _edit_in_place(f: UploadedFile, changed: set[int]) -> bool:
     """Recompute only the `changed` rows in the warm cache after their corrections
-    were updated, instead of re-cleaning the entire file.
+    were updated (written, or removed by a revert), instead of re-cleaning the
+    entire file.
 
     Returns False if the cache is cold or in an unexpected state, so the caller
     falls back to a full invalidate + rebuild — always correct, just slower. This
@@ -283,11 +285,12 @@ def _edit_in_place(f: UploadedFile, changed: set[int]) -> bool:
 
     for idx in changed:
         bv = base_values.get(idx)
-        override = corrections.get(str(idx))
-        # An edit always writes an override for a row that's present (not dropped).
-        # Anything else is unexpected -> bail to the safe full-rebuild path.
-        if bv is None or override is None or idx in dropped or idx not in pos:
+        # A revert clears the row's override, so a missing one is expected there;
+        # the row simply re-cleans back to its pre-review values. A row that's
+        # absent or dropped is unexpected -> bail to the safe full-rebuild path.
+        if bv is None or idx in dropped or idx not in pos:
             return False
+        override = corrections.get(str(idx)) or {}
         cleaned, issues = revalidate({**bv, **override})
         issues = _mark_corrected(bv, cleaned, issues, override)
         rows[pos[idx]] = CleanRow(index=idx, values=cleaned, issues=issues)
@@ -349,6 +352,14 @@ def _accept_in_place(f: UploadedFile) -> None:
     entry["profile"] = None
 
 
+def _row_key(key: object) -> int | None:
+    """A `corrections` dict key as a row index, or None when it isn't one."""
+    try:
+        return int(key)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+
+
 def _manual_kinds(f: UploadedFile) -> dict[int, str]:
     """row_index -> how a human moved that row into the clean set.
 
@@ -363,10 +374,9 @@ def _manual_kinds(f: UploadedFile) -> dict[int, str]:
     """
     kinds: dict[int, str] = {i: "kept" for i in (f.accepted or [])}
     for key in (f.corrections or {}):
-        try:
-            kinds[int(key)] = "edited"
-        except (TypeError, ValueError):
-            continue
+        idx = _row_key(key)
+        if idx is not None:
+            kinds[idx] = "edited"
     return kinds
 
 
@@ -1197,6 +1207,66 @@ def accept_rows(
     db.commit()
     # Fast path: update the cached rows in place instead of a full re-clean.
     _accept_in_place(f)
+    return _review_payload(
+        f, view, tag, page, page_size, include_profile,
+        tags=_split_csv(tags), sort=sort, direction=dir,
+        contains_col=contains_col, contains_val=contains_val,
+    )
+
+
+@router.post("/api/files/{file_id}/revert", response_model=ReviewOut)
+def revert_rows(
+    file_id: int,
+    payload: RowsRevert,
+    view: str = "all",
+    tag: str | None = None,
+    tags: str | None = None,
+    sort: str | None = None,
+    dir: str = "asc",
+    contains_col: str | None = None,
+    contains_val: str | None = None,
+    select_all: bool = False,
+    page: int = 0,
+    page_size: int = 50,
+    include_profile: bool = True,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Send manually-cleaned rows back to Needs review — the inverse of /accept.
+
+    Drops each row's "keep as-is" acceptance AND its reviewer corrections, so the
+    row re-cleans from its original values and its error flags come back. A row
+    whose original values were already clean simply returns to the Auto cleaned
+    tab. Rows the tool cleaned on its own are ignored (nothing to undo).
+
+    `select_all=true` reverts every manually-cleaned row in the current filtered
+    view instead of the explicit `rows` list."""
+    f = _get_file_or_404(file_id, user, db)
+    manual = _manual_kinds(f)
+    if select_all:
+        targets = {
+            r.index
+            for r in _filter_rows(
+                build_rows(f), view, tag, _split_csv(tags),
+                contains_col, contains_val, manual,
+            )
+            if r.index in manual
+        }
+    else:
+        targets = {i for i in payload.rows if i in manual}
+
+    if targets:
+        f.accepted = [i for i in (f.accepted or []) if i not in targets]
+        f.corrections = {
+            k: v for k, v in (f.corrections or {}).items()
+            if _row_key(k) not in targets
+        }
+        db.commit()
+        # Re-clean only the reverted rows in the warm cache; the values change, so
+        # this can't use the cheaper _accept_in_place path.
+        if not _edit_in_place(f, targets):
+            _invalidate(file_id)
+
     return _review_payload(
         f, view, tag, page, page_size, include_profile,
         tags=_split_csv(tags), sort=sort, direction=dir,

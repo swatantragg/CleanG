@@ -2146,6 +2146,22 @@ input::placeholder {
   border-color: var(--green);
   color: var(--green);
 }
+/* "Send back to review" per-row button — same quiet outline, red on hover since
+   it undoes the manual clean and discards that row's edits. */
+.cell-revert {
+  margin-left: 0.4rem;
+  border: 1px solid var(--border-strong);
+  background: var(--surface);
+  color: var(--muted);
+  border-radius: 5px;
+  padding: 0.1rem 0.25rem;
+  cursor: pointer;
+  vertical-align: middle;
+}
+.cell-revert:hover {
+  border-color: var(--red);
+  color: var(--red);
+}
 
 /* Row selection */
 .row-check {

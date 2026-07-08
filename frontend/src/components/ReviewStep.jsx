@@ -163,6 +163,9 @@ export default function ReviewStep({ file, onCommitted }) {
   // --- Save confirmation ---
   const [showSaveConfirm, setShowSaveConfirm] = useState(false);
 
+  // --- Send manually-cleaned rows back to "Needs review" ---
+  const [revertConfirm, setRevertConfirm] = useState(null); // {rows, all, count}
+
   // --- Near-duplicate review (cleaned row vs. an existing master record) ---
   const [checkingConflicts, setCheckingConflicts] = useState(false);
   const [conflicts, setConflicts] = useState(null); // [{row_index, master_id, ...}]
@@ -744,6 +747,41 @@ export default function ReviewStep({ file, onCommitted }) {
     clearSelection();
   }
 
+  // --- Undo a manual clean: back to "Needs review" ---------------------------
+  // Destructive (any inline edits on those rows are thrown away), so every entry
+  // point routes through a confirmation first.
+  function askRevert(rowIndexes, all = false) {
+    const count = all ? total : rowIndexes.length;
+    if (count > 0) setRevertConfirm({ rows: all ? [] : rowIndexes, all, count });
+  }
+
+  // Drops the rows' "kept as-is" acceptance and their corrections, so they
+  // re-clean from the original values and their flags come back.
+  async function confirmRevert() {
+    const req = revertConfirm;
+    if (!req) return;
+    setRevertConfirm(null);
+    // One row reverted from its own button gets the same inline spinner as a keep.
+    const single = !req.all && req.rows.length === 1 ? req.rows[0] : null;
+    if (single !== null) markPending(single, true);
+    setBusy(true);
+    setError("");
+    try {
+      const qs = buildQs(true) + (req.all ? "&select_all=true" : "");
+      const d = await api(`/api/files/${file.id}/revert?${qs}`, {
+        method: "POST",
+        body: { rows: req.rows },
+      });
+      applyPayload(d);
+      clearSelection();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      if (single !== null) markPending(single, false);
+      setBusy(false);
+    }
+  }
+
   async function runBulk(action) {
     setBusy(true);
     setError("");
@@ -1222,7 +1260,7 @@ export default function ReviewStep({ file, onCommitted }) {
         <span><i className="lg-dot blank" /> Empty cell</span>
         <span className="muted small lg-hint">
           {view === "manual_clean"
-            ? "Ringed cells are the ones you changed · “kept” rows were accepted as-is"
+            ? "Ringed cells are the ones you changed · “kept” rows were accepted as-is · tick rows (or use ←) to send them back to review"
             : "Hover a cell to see the original value · click a flagged cell to edit"}
         </span>
       </div>
@@ -1361,12 +1399,23 @@ export default function ReviewStep({ file, onCommitted }) {
                           >
                             <Icon name="check" size={12} />
                           </button>
-                        ) : view === "manual_clean" && row.manual_kind === "kept" ? (
-                          // Nothing on this row changed — the reviewer accepted it as-is,
-                          // so there's no cell to highlight. Mark the row instead.
-                          <span className="row-kept" title="Kept as-is by a reviewer — values unchanged">
-                            kept
-                          </span>
+                        ) : view === "manual_clean" && row.manual_kind ? (
+                          <>
+                            {row.manual_kind === "kept" && (
+                              // Nothing on this row changed — the reviewer accepted it
+                              // as-is, so there's no cell to highlight. Mark the row.
+                              <span className="row-kept" title="Kept as-is by a reviewer — values unchanged">
+                                kept
+                              </span>
+                            )}
+                            <button
+                              className="cell-revert"
+                              title="Send this row back to Needs review (undoes the manual clean)"
+                              onClick={() => askRevert([row.row_index])}
+                            >
+                              <Icon name="arrowLeft" size={12} />
+                            </button>
+                          </>
                         ) : null}
                       </td>
                       {displayColumns.map((c, ci) => {
@@ -1496,10 +1545,24 @@ export default function ReviewStep({ file, onCommitted }) {
             <button className="btn sm" onClick={clearSelection} disabled={busy}>
               Clear
             </button>
-            <button className="btn primary sm" onClick={keepSelected} disabled={busy}>
-              <Icon name="check" size={15} />
-              {busy ? "Keeping…" : "Keep selected as-is"}
-            </button>
+            {view === "manual_clean" ? (
+              // These rows are already clean — the only useful bulk action is to
+              // undo the manual clean and send them back to the review queue.
+              <button
+                className="btn danger sm"
+                onClick={() => askRevert([...selected], selectAllPages)}
+                disabled={busy}
+                title="Undo the manual clean and put these rows back in Needs review"
+              >
+                <Icon name="arrowLeft" size={15} />
+                {busy ? "Reverting…" : "Send back to review"}
+              </button>
+            ) : (
+              <button className="btn primary sm" onClick={keepSelected} disabled={busy}>
+                <Icon name="check" size={15} />
+                {busy ? "Keeping…" : "Keep selected as-is"}
+              </button>
+            )}
           </div>
         </div>
       )}
@@ -1753,6 +1816,35 @@ export default function ReviewStep({ file, onCommitted }) {
               >
                 <Icon name="check" size={15} />
                 Save {summary?.clean ?? 0} row{summary?.clean === 1 ? "" : "s"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* "Send back to review" confirmation — it discards manual edits, so ask */}
+      {revertConfirm && (
+        <div className="save-overlay" onClick={() => setRevertConfirm(null)}>
+          <div className="confirm-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="confirm-spark danger">
+              <Icon name="arrowLeft" size={22} />
+            </div>
+            <h3>
+              Send {revertConfirm.count} row{revertConfirm.count === 1 ? "" : "s"} back to
+              review?
+            </h3>
+            <p className="muted">
+              <strong>Manual edits on these rows are discarded</strong> — the tool’s own
+              cleaned values come back, along with any flags, so they’ll need reviewing
+              again. A row that had no flags to begin with just moves to Auto Cleaned.
+            </p>
+            <div className="confirm-actions">
+              <button className="btn sm" onClick={() => setRevertConfirm(null)} disabled={busy}>
+                Cancel
+              </button>
+              <button className="btn danger sm" onClick={confirmRevert} disabled={busy}>
+                <Icon name="arrowLeft" size={15} />
+                {busy ? "Reverting…" : "Send back to review"}
               </button>
             </div>
           </div>

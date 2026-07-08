@@ -436,6 +436,14 @@ class RowsAccept(BaseModel):
     rows: Annotated[list[int], Field(max_length=1_000_000)] = []
 
 
+class RowsRevert(BaseModel):
+    """Undo the manual clean on rows: drop their "keep as-is" acceptance and any
+    reviewer corrections, so they fall back to Needs review. Empty `rows` +
+    `select_all=true` means: revert every row in the current filtered view."""
+
+    rows: Annotated[list[int], Field(max_length=1_000_000)] = []
+
+
 class BulkFix(BaseModel):
     tag: str
     column: str | None = None
