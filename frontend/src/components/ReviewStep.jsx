@@ -2,8 +2,14 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { api, download } from "../api/client.js";
 import Icon from "./Icon.jsx";
+import Pager, { effectivePageSize } from "./Pager.jsx";
 
-const PAGE_SIZE = 50;
+// Excel-style frozen panes: the row number plus this many leading columns stay
+// pinned while the rest of the grid scrolls sideways.
+const FROZEN_COLS = 5;
+// …unless they'd eat the viewport. Never pin more than this share of the grid's
+// visible width, or there'd be nothing left to scroll.
+const FROZEN_MAX_SHARE = 0.6;
 
 // A distinct colour per error type so the grid, chips and captions all agree —
 // you can tell at a glance which kind of problem each red cell is.
@@ -42,14 +48,56 @@ const TAG_COLORS = {
 };
 const tagColor = (t) => TAG_COLORS[t] || "#6b7280";
 
+// Each tab names its own download, so a folder of exports is self-explanatory —
+// e.g. "Demo(manual_cleaned_singer_desc).xlsx".
+const VIEW_SLUG = {
+  all: "all_rows",
+  error: "needs_review",
+  auto_clean: "auto_cleaned",
+  manual_clean: "manual_cleaned",
+};
+
+/**
+ * Where each frozen column has to be pinned, measured off the live header row.
+ * Column widths are content-driven, so the offsets can't be known up front: the
+ * Nth pinned column sits at the summed width of the row-number cell and every
+ * pinned column before it.
+ *
+ * Returns one left-offset per pinned column — fewer than FROZEN_COLS (or none)
+ * when pinning them all would leave too little of the grid scrollable.
+ */
+function measureFrozen(scrollEl) {
+  const cells = scrollEl.querySelector("thead tr")?.children;
+  if (!cells || cells.length < 2) return [];
+  const budget = scrollEl.clientWidth * FROZEN_MAX_SHARE;
+  const lefts = [];
+  let left = cells[0].offsetWidth; // the sticky row-number column
+  const last = Math.min(FROZEN_COLS, cells.length - 1);
+  for (let i = 1; i <= last; i++) {
+    const w = cells[i].offsetWidth;
+    if (left + w > budget) break;
+    lefts.push(left);
+    left += w;
+  }
+  return lefts;
+}
+
+// The empty-grid line, per tab.
+const EMPTY_TEXT = {
+  error: "Nothing left to review here 🎉",
+  auto_clean: "No rows were cleaned automatically.",
+  manual_clean: "No rows cleaned manually yet — fix or keep a flagged row and it lands here.",
+};
+
 export default function ReviewStep({ file, onCommitted }) {
   const [summary, setSummary] = useState(null);
   const [profile, setProfile] = useState(null);
   const [rows, setRows] = useState([]);
   const [total, setTotal] = useState(0);
-  const [view, setView] = useState("all"); // all | error | clean
+  const [view, setView] = useState("all"); // all | error | auto_clean | manual_clean
   const [activeTag, setActiveTag] = useState(null);
   const [page, setPage] = useState(0);
+  const [pageSize, setPageSize] = useState(50); // 0 = All
   const [drafts, setDrafts] = useState({}); // rowIndex -> {col: value}
   const [bulkValue, setBulkValue] = useState("");
   const [busy, setBusy] = useState(false);
@@ -107,6 +155,10 @@ export default function ReviewStep({ file, onCommitted }) {
   const topScrollRef = useRef(null);
   const [gridWidth, setGridWidth] = useState(0);
   const [hasXOverflow, setHasXOverflow] = useState(false); // grid wider than viewport
+
+  // Left offsets (px) for the frozen leading columns, measured from the rendered
+  // header. Its length is how many columns are actually pinned.
+  const [frozenLefts, setFrozenLefts] = useState([]);
 
   // --- Save confirmation ---
   const [showSaveConfirm, setShowSaveConfirm] = useState(false);
@@ -173,7 +225,9 @@ export default function ReviewStep({ file, onCommitted }) {
     return m;
   }, [profile]);
 
-  const pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+  // "All" has no page size of its own — ask for more rows than any file holds.
+  const apiPageSize = effectivePageSize(pageSize);
+  const pages = Math.max(1, Math.ceil(total / apiPageSize));
 
   // Shared query string so GET /review and the edit/accept mutations all target
   // the same view/tag/page — letting mutations return the refreshed grid in one
@@ -183,7 +237,7 @@ export default function ReviewStep({ file, onCommitted }) {
       const qs = new URLSearchParams({
         view,
         page: String(page),
-        page_size: String(PAGE_SIZE),
+        page_size: String(apiPageSize),
         include_profile: String(withProfile),
       });
       if (activeTag) qs.set("tag", activeTag);
@@ -198,7 +252,7 @@ export default function ReviewStep({ file, onCommitted }) {
       }
       return qs.toString();
     },
-    [view, page, activeTag, activeTags, sortCol, sortDir, containsCol, containsVal]
+    [view, page, apiPageSize, activeTag, activeTags, sortCol, sortDir, containsCol, containsVal]
   );
 
   const applyPayload = useCallback((d) => {
@@ -255,6 +309,15 @@ export default function ReviewStep({ file, onCommitted }) {
     const measure = () => {
       setGridWidth(el.scrollWidth);
       setHasXOverflow(el.scrollWidth > el.clientWidth + 1);
+      setFrozenLefts((prev) => {
+        const next = measureFrozen(el);
+        // Sticky positioning doesn't change layout, so this can't feed back into
+        // the ResizeObserver — but bail on an identical result anyway to avoid a
+        // pointless re-render of a very large grid.
+        return prev.length === next.length && prev.every((v, i) => v === next[i])
+          ? prev
+          : next;
+      });
     };
     measure();
     window.addEventListener("resize", measure);
@@ -301,6 +364,22 @@ export default function ReviewStep({ file, onCommitted }) {
     setPage(0);
     clearSelection();
   }
+
+  // Row count per page. Page 1 is the only page guaranteed to exist afterwards,
+  // and a cross-page selection no longer means what it did, so reset both.
+  function changePageSize(n) {
+    setPageSize(n);
+    setPage(0);
+    clearSelection();
+  }
+
+  // Excel-style frozen panes. `i` is the column's position in displayColumns;
+  // the pinned ones get a measured `left` so they stack flush against each other.
+  const isFrozen = (i) => i < frozenLefts.length;
+  const frozenClass = (i) =>
+    isFrozen(i)
+      ? ` col-frozen${i === frozenLefts.length - 1 ? " col-frozen-last" : ""}`
+      : "";
 
   function clearSelection() {
     setSelected(new Set());
@@ -781,10 +860,7 @@ export default function ReviewStep({ file, onCommitted }) {
   function buildDownloadName() {
     const slug = (s) =>
       String(s).toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
-    const parts = [];
-    if (view === "error") parts.push("needs_review");
-    else if (view === "clean") parts.push("clean");
-    else parts.push("all_rows");
+    const parts = [VIEW_SLUG[view] || "all_rows"];
     if (activeTag) parts.push(tagLabel[activeTag] || activeTag);
     activeTags.forEach((t) => parts.push(tagLabel[t] || t));
     if (sortCol) parts.push(`${sortCol}_${sortDir}`);
@@ -992,8 +1068,19 @@ export default function ReviewStep({ file, onCommitted }) {
             <button className={view === "error" ? "active" : ""} onClick={() => switchView("error")}>
               Needs review ({errorsLeft})
             </button>
-            <button className={view === "clean" ? "active" : ""} onClick={() => switchView("clean")}>
-              Clean ({summary?.clean ?? 0})
+            <button
+              className={view === "auto_clean" ? "active" : ""}
+              onClick={() => switchView("auto_clean")}
+              title="Rows the tool cleaned on its own — no human touched them"
+            >
+              Auto Cleaned ({summary?.auto_clean ?? 0})
+            </button>
+            <button
+              className={view === "manual_clean" ? "active" : ""}
+              onClick={() => switchView("manual_clean")}
+              title="Rows you reviewed — edited or kept as-is — and sent to the clean set"
+            >
+              Manual Cleaned ({summary?.manual_clean ?? 0})
             </button>
           </div>
           <button className="btn sm filter-btn" onClick={openFilters}>
@@ -1133,8 +1220,24 @@ export default function ReviewStep({ file, onCommitted }) {
         <span><i className="lg-dot" style={{ background: tagColor("corrected") }} /> Manually corrected</span>
         <span><i className="lg-dot red" /> Needs your review</span>
         <span><i className="lg-dot blank" /> Empty cell</span>
-        <span className="muted small lg-hint">Hover a cell to see the original value · click a flagged cell to edit</span>
+        <span className="muted small lg-hint">
+          {view === "manual_clean"
+            ? "Ringed cells are the ones you changed · “kept” rows were accepted as-is"
+            : "Hover a cell to see the original value · click a flagged cell to edit"}
+        </span>
       </div>
+
+      {/* Pager above the grid too, so changing page never means scrolling to the
+          bottom of a 50-row table first. */}
+      <Pager
+        page={page}
+        pages={pages}
+        total={total}
+        disabled={loading}
+        onChange={setPage}
+        pageSize={pageSize}
+        onPageSizeChange={changePageSize}
+      />
 
       {/* Top horizontal scrollbar, synced with the grid — scroll across columns
           without having to reach the bottom of the table first. Shown only when
@@ -1165,13 +1268,16 @@ export default function ReviewStep({ file, onCommitted }) {
                   title="Select all rows on this page"
                 />
               </th>
-              {displayColumns.map((c) => (
+              {displayColumns.map((c, ci) => (
                 <th
                   key={c}
                   className={`${focusSet.has(c) ? "col-focus" : ""}${
                     editCol === c ? " col-editing" : ""
-                  }`}
-                  style={focusSet.has(c) ? { "--tag": tagColor(activeTag) } : undefined}
+                  }${frozenClass(ci)}`}
+                  style={{
+                    ...(focusSet.has(c) ? { "--tag": tagColor(activeTag) } : null),
+                    ...(isFrozen(ci) ? { left: frozenLefts[ci] } : null),
+                  }}
                 >
                   <div className="th-inner">
                     <button
@@ -1205,8 +1311,12 @@ export default function ReviewStep({ file, onCommitted }) {
                     <td className="rownum">
                       <span className="sk sk-line" style={{ width: 20, height: 10 }} />
                     </td>
-                    {displayColumns.map((c) => (
-                      <td key={c}>
+                    {displayColumns.map((c, ci) => (
+                      <td
+                        key={c}
+                        className={frozenClass(ci).trim()}
+                        style={isFrozen(ci) ? { left: frozenLefts[ci] } : undefined}
+                      >
                         <span className="sk sk-line" style={{ width: "80%", height: 10 }} />
                       </td>
                     ))}
@@ -1221,6 +1331,8 @@ export default function ReviewStep({ file, onCommitted }) {
                       key={row.row_index}
                       className={`${row.status === "error" ? "row-err" : ""}${
                         selectAllPages || selected.has(row.row_index) ? " row-sel" : ""
+                      }${
+                        view === "manual_clean" && row.manual_kind ? " row-manual" : ""
                       }`}
                     >
                       <td className="rownum">
@@ -1249,16 +1361,28 @@ export default function ReviewStep({ file, onCommitted }) {
                           >
                             <Icon name="check" size={12} />
                           </button>
+                        ) : view === "manual_clean" && row.manual_kind === "kept" ? (
+                          // Nothing on this row changed — the reviewer accepted it as-is,
+                          // so there's no cell to highlight. Mark the row instead.
+                          <span className="row-kept" title="Kept as-is by a reviewer — values unchanged">
+                            kept
+                          </span>
                         ) : null}
                       </td>
-                      {displayColumns.map((c) => {
+                      {displayColumns.map((c, ci) => {
                         const issue = errs[c];
                         const val = drafts[row.row_index]?.[c] ?? row.values[c] ?? "";
+                        // A pinned cell needs the same measured offset as its header.
+                        const pin = isFrozen(ci) ? { left: frozenLefts[ci] } : null;
                         // Whole-column edit mode: every cell of this column on the
                         // page becomes a plain editable input (page-only scope).
                         if (editCol === c) {
                           return (
-                            <td key={c} className="cell-edit">
+                            <td
+                              key={c}
+                              className={`cell-edit${frozenClass(ci)}`}
+                              style={pin || undefined}
+                            >
                               <input
                                 value={val}
                                 onChange={(e) =>
@@ -1272,8 +1396,8 @@ export default function ReviewStep({ file, onCommitted }) {
                           return (
                             <td
                               key={c}
-                              className="cell-flagged"
-                              style={{ "--tag": tagColor(issue.tag) }}
+                              className={`cell-flagged${frozenClass(ci)}`}
+                              style={{ "--tag": tagColor(issue.tag), ...pin }}
                               title={issue.message}
                             >
                               <input
@@ -1295,14 +1419,17 @@ export default function ReviewStep({ file, onCommitted }) {
                         const fix = fixes[c];
                         if (fix) {
                           const from = (fix.original || "").trim();
+                          // A cell a human changed gets a stronger wash + border than the
+                          // tool's own green auto-fixes, so it's obvious on a later review.
+                          const manual = fix.tag === "corrected";
                           return (
                             <td
                               key={c}
-                              className="cell-fixed"
-                              style={{ "--tag": tagColor(fix.tag) }}
-                              title={`${tagLabel[fix.tag] || "Auto-fixed"}${
-                                from ? ` — was “${from}”` : ""
-                              }`}
+                              className={`cell-fixed${manual ? " cell-manual" : ""}${frozenClass(ci)}`}
+                              style={{ "--tag": tagColor(fix.tag), ...pin }}
+                              title={`${
+                                manual ? "Manually corrected" : tagLabel[fix.tag] || "Auto-fixed"
+                              }${from ? ` — was “${from}”` : ""}`}
                             >
                               <span className="fixed-val">
                                 <span className="fix-mark">
@@ -1325,7 +1452,8 @@ export default function ReviewStep({ file, onCommitted }) {
                         return (
                           <td
                             key={c}
-                            className={val === "" ? "cell-blank" : ""}
+                            className={`${val === "" ? "cell-blank" : ""}${frozenClass(ci)}`}
+                            style={pin || undefined}
                             title={val || undefined}
                           >
                             {val || "—"}
@@ -1339,7 +1467,7 @@ export default function ReviewStep({ file, onCommitted }) {
               <tr>
                 <td colSpan={displayColumns.length + 1} className="grid-empty">
                   <Icon name="check" size={20} />
-                  {view === "error" ? "Nothing left to review here 🎉" : "No rows to show."}
+                  {EMPTY_TEXT[view] || "No rows to show."}
                 </td>
               </tr>
             )}
@@ -1437,23 +1565,15 @@ export default function ReviewStep({ file, onCommitted }) {
       )}
 
       {/* Pagination */}
-      {pages > 1 && (
-        <div className="pager">
-          <button className="btn sm" disabled={page === 0 || loading} onClick={() => setPage((p) => p - 1)}>
-            ← Prev
-          </button>
-          <span className="muted small">
-            Page {page + 1} of {pages} · {total} row{total === 1 ? "" : "s"}
-          </span>
-          <button
-            className="btn sm"
-            disabled={page >= pages - 1 || loading}
-            onClick={() => setPage((p) => p + 1)}
-          >
-            Next →
-          </button>
-        </div>
-      )}
+      <Pager
+        page={page}
+        pages={pages}
+        total={total}
+        disabled={loading}
+        onChange={setPage}
+        pageSize={pageSize}
+        onPageSizeChange={changePageSize}
+      />
 
       {/* Column-header menu — fixed-positioned so the scroll container can't clip it */}
       {headerMenuCol && headerMenuPos && (

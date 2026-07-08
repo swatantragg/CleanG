@@ -31,6 +31,11 @@ services:
       SMTP_USER: ${SMTP_USER:-}
       SMTP_PASS: ${SMTP_PASS:-}
       SMTP_FROM: ${SMTP_FROM:-}
+      # Printed on boot so the logs say where this service answers. Not published
+      # to the host, so the only address that resolves is the compose-network one.
+      SERVICE_URL: ${BACKEND_URL:-http://backend:8000}
+    labels:
+      app.url: "http://backend:8000 — internal only; reach it through the frontend at /api"
     # The API is NOT published to the host: it is reachable only on the internal
     # compose network, exclusively through the nginx reverse proxy (which adds the
     # CSP, the 20 MB upload cap and the served security headers). Publishing it
@@ -49,6 +54,13 @@ services:
     build: ./frontend
     depends_on:
       - backend
+    environment:
+      # The public address users hit. In production Traefik terminates TLS on the
+      # app's FQDN, so set FRONTEND_URL to it (e.g. https://cleanser.example.in)
+      # and the boot log will name it.
+      SERVICE_URL: ${FRONTEND_URL:-http://localhost}
+    labels:
+      app.url: "${FRONTEND_URL:-http://localhost} — public entrypoint (SPA + /api proxy)"
     # Coolify's reverse proxy (Traefik) routes the app's FQDN to this container
     # on port 80. Do NOT publish a fixed host port — it conflicts with whatever
     # already holds the port on the host and bypasses the proxy / TLS.
