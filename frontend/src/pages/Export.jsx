@@ -1,6 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, download } from "../api/client.js";
 import Icon from "../components/Icon.jsx";
+import Pager, { effectivePageSize } from "../components/Pager.jsx";
+
+// Mirrors schemas.PREVIEW_MAX_ROWS — the server rejects a bigger `limit`.
+const PREVIEW_MAX_ROWS = 2000;
 
 // One pre-filter row: type a name, pick from values that exist in the master
 // data, and the chosen values become chips. Suggestions are debounced.
@@ -106,11 +110,14 @@ export default function Export() {
   const [verifyResult, setVerifyResult] = useState(null);
 
   // Read-only preview of the (filtered) master data — just a view of the rows.
-  const PREVIEW_PAGE_SIZE = 25;
+  // The master dataset has no upper bound, so "All" is capped server-side
+  // (schemas.PREVIEW_MAX_ROWS); past that the pager simply keeps paging.
   const [preview, setPreview] = useState({ columns: [], rows: [], total: 0 });
   const [previewPage, setPreviewPage] = useState(0);
+  const [previewSize, setPreviewSize] = useState(50); // 0 = All
   const [previewLoading, setPreviewLoading] = useState(false);
   const [previewErr, setPreviewErr] = useState("");
+  const previewLimit = Math.min(effectivePageSize(previewSize), PREVIEW_MAX_ROWS);
 
   useEffect(() => {
     (async () => {
@@ -252,8 +259,8 @@ export default function Export() {
           body: {
             filters: cleanFilters,
             columns: resolved,
-            limit: PREVIEW_PAGE_SIZE,
-            offset: previewPage * PREVIEW_PAGE_SIZE,
+            limit: previewLimit,
+            offset: previewPage * previewLimit,
           },
         });
         if (!cancelled) setPreview(res);
@@ -268,11 +275,16 @@ export default function Export() {
       clearTimeout(t);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [previewKey, previewPage]);
+  }, [previewKey, previewPage, previewLimit]);
 
-  const previewFrom = preview.total === 0 ? 0 : previewPage * PREVIEW_PAGE_SIZE + 1;
-  const previewTo = Math.min((previewPage + 1) * PREVIEW_PAGE_SIZE, preview.total);
-  const previewMaxPage = Math.max(0, Math.ceil(preview.total / PREVIEW_PAGE_SIZE) - 1);
+  const previewFrom = preview.total === 0 ? 0 : previewPage * previewLimit + 1;
+  const previewTo = Math.min((previewPage + 1) * previewLimit, preview.total);
+  const previewMaxPage = Math.max(0, Math.ceil(preview.total / previewLimit) - 1);
+
+  function changePreviewSize(n) {
+    setPreviewSize(n);
+    setPreviewPage(0); // page 1 is the only page guaranteed to survive the change
+  }
 
   const MODES = [
     { key: "PDL", title: "PDL + Custom", desc: "PDL preset columns, plus any extras you add." },
@@ -418,6 +430,19 @@ export default function Export() {
           <div className="alert"><Icon name="alert" size={16} /> {previewErr}</div>
         )}
 
+        {/* Pager above the table as well as below it — the row count is already
+            spelled out in the header, so skip the redundant meta line here. */}
+        <Pager
+          page={previewPage}
+          pages={previewMaxPage + 1}
+          disabled={previewLoading}
+          onChange={setPreviewPage}
+          pageSize={previewSize}
+          onPageSizeChange={changePreviewSize}
+          maxPageSize={PREVIEW_MAX_ROWS}
+          meta={false}
+        />
+
         <div className="preview-table-wrap">
           <table className="table preview-table">
             <thead>
@@ -443,7 +468,7 @@ export default function Export() {
                 preview.rows.map((row, i) => (
                   <tr key={i}>
                     <td className="preview-idx">
-                      {previewPage * PREVIEW_PAGE_SIZE + i + 1}
+                      {previewPage * previewLimit + i + 1}
                     </td>
                     {preview.columns.map((c) => (
                       <td key={c} title={row[c] || ""}>
@@ -457,27 +482,16 @@ export default function Export() {
           </table>
         </div>
 
-        {preview.total > PREVIEW_PAGE_SIZE && (
-          <div className="preview-pager">
-            <button
-              className="btn sm"
-              disabled={previewPage === 0 || previewLoading}
-              onClick={() => setPreviewPage((p) => Math.max(0, p - 1))}
-            >
-              <Icon name="arrowLeft" size={14} /> Prev
-            </button>
-            <span className="muted small">
-              Page {previewPage + 1} of {previewMaxPage + 1}
-            </span>
-            <button
-              className="btn sm"
-              disabled={previewPage >= previewMaxPage || previewLoading}
-              onClick={() => setPreviewPage((p) => Math.min(previewMaxPage, p + 1))}
-            >
-              Next <Icon name="arrowRight" size={14} />
-            </button>
-          </div>
-        )}
+        <Pager
+          page={previewPage}
+          pages={previewMaxPage + 1}
+          total={preview.total}
+          disabled={previewLoading}
+          onChange={setPreviewPage}
+          pageSize={previewSize}
+          onPageSizeChange={changePreviewSize}
+          maxPageSize={PREVIEW_MAX_ROWS}
+        />
       </div>
 
       {/* 2 — Choose the export shape */}

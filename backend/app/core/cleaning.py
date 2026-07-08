@@ -35,11 +35,12 @@ NAME_SEP = " | "
 _NAME_SPLIT = re.compile(r"\s*[|,&]\s*|\s+and\s+", re.IGNORECASE)
 # Split an already-cleaned, pipe-joined name cell back into its individual names.
 _PIPE_SPLIT = re.compile(r"\s*\|\s*")
-# In a Label cell, several labels can be joined by "&" or the word "and"/"And"
-# (any case) — normalize those joiners to a pipe so multi-label cells read
-# uniformly. The "and" arm requires surrounding whitespace so it never breaks a
-# value that merely contains the letters (e.g. "Brand"). Label-only.
-_LABEL_JOIN = re.compile(r"\s*&\s*|\s+and\s+", re.IGNORECASE)
+# In a Label cell, several labels can be joined by a comma, an "&", or the word
+# "and"/"And" (any case) — normalize those joiners to a pipe so multi-label cells
+# read uniformly ("Global Music Junction, I Believe Music" -> "... | ..."). The
+# "and" arm requires surrounding whitespace so it never breaks a value that merely
+# contains the letters (e.g. "Brand"). Label-only.
+_LABEL_JOIN = re.compile(r"\s*[,&]\s*|\s+and\s+", re.IGNORECASE)
 
 # Lead Artist is a roll-up of the creative/performing credits. It's filled from
 # these columns, in this priority order — any names already in Lead Artist are
@@ -543,13 +544,18 @@ def _clean_category(value) -> Cell:
 
 def _clean_label(value) -> Cell:
     """Clean a record-label cell; same as category but joins multi-label cells
-    on a pipe — any "&", "and" or "And" between labels becomes " | "."""
+    on a pipe — any ",", "&", "and" or "And" between labels becomes " | ".
+
+    Splitting (rather than a plain substitution) drops the empty pieces a stray
+    or trailing joiner leaves behind, so "A, & B," yields "A | B", never "A |  | B |".
+    """
     raw = "" if value is None else str(value)
     base = _base_text(value)
     gate = _blank_or_junk(raw, base)
     if gate:
         return gate
-    out = _LABEL_JOIN.sub(" | ", base)
+    parts = [p.strip() for p in _LABEL_JOIN.split(base) if p.strip()]
+    out = " | ".join(parts)
     return Cell(out, "fixed" if out != raw else "ok", original=raw)
 
 

@@ -18,4 +18,9 @@ COPY --from=build /app/dist /usr/share/nginx/html
 
 EXPOSE 80
 
-CMD ["nginx", "-g", "daemon off;"]
+# Where this container answers, echoed on boot so `docker compose logs frontend`
+# tells you the URL outright. Compose overrides it per environment.
+ENV SERVICE_URL=http://localhost
+
+# `exec` hands PID 1 to nginx so SIGTERM/SIGQUIT still stop it cleanly.
+CMD ["sh", "-c", "echo \"[CleanG] Frontend UI -> ${SERVICE_URL}  (SPA + /api proxied to the backend)\"; exec nginx -g 'daemon off;'"]

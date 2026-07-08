@@ -349,9 +349,34 @@ def _accept_in_place(f: UploadedFile) -> None:
     entry["profile"] = None
 
 
-def _row_out(r: CleanRow) -> CleanRowOut:
+def _manual_kinds(f: UploadedFile) -> dict[int, str]:
+    """row_index -> how a human moved that row into the clean set.
+
+    "edited" — the reviewer changed cell values (inline edit, bulk set, or an
+    artist merge), stored as a correction.
+    "kept"   — the reviewer hit "keep as-is", clearing the row's error flags
+    without touching any value.
+
+    A row that was both edited and accepted reports "edited" (the stronger,
+    more informative signal). Rows absent from this map were cleaned entirely by
+    the tool — the "Auto cleaned" tab.
+    """
+    kinds: dict[int, str] = {i: "kept" for i in (f.accepted or [])}
+    for key in (f.corrections or {}):
+        try:
+            kinds[int(key)] = "edited"
+        except (TypeError, ValueError):
+            continue
+    return kinds
+
+
+def _row_out(r: CleanRow, manual_kind: str | None = None) -> CleanRowOut:
     return CleanRowOut(
-        row_index=r.index, status=r.status, values=r.values, issues=r.issues
+        row_index=r.index,
+        status=r.status,
+        values=r.values,
+        issues=r.issues,
+        manual_kind=manual_kind,
     )
 
 
@@ -374,7 +399,8 @@ def _review_payload(
     Optional `tags` (match ANY), `contains_col`/`contains_val` (value filter) and
     `sort`/`direction` are applied server-side so they hold across pages."""
     rows = build_rows(f)
-    filtered = _filter_rows(rows, view, tag, tags, contains_col, contains_val)
+    manual = _manual_kinds(f)
+    filtered = _filter_rows(rows, view, tag, tags, contains_col, contains_val, manual)
     filtered = _sort_rows(filtered, sort, direction)
     total = len(filtered)
     page = max(0, page)
@@ -382,7 +408,7 @@ def _review_payload(
     return ReviewOut(
         summary=_get_summary(f),
         profile=_get_profile(f) if include_profile else None,
-        rows=[_row_out(r) for r in page_rows],
+        rows=[_row_out(r, manual.get(r.index)) for r in page_rows],
         total=total,
         page=page,
         page_size=page_size,
@@ -392,11 +418,15 @@ def _review_payload(
 def _summary(f: UploadedFile, rows: list[CleanRow]) -> CleanSummary:
     tags: Counter = Counter()
     fix_tags: Counter = Counter()
+    manual = _manual_kinds(f)
     auto_fixed = 0
     clean = 0
+    manual_clean = 0
     for r in rows:
         if r.status == "clean":
             clean += 1
+            if r.index in manual:
+                manual_clean += 1
         for i in r.issues:
             if i["action"] == "error":
                 tags[i["tag"]] += 1
@@ -406,6 +436,8 @@ def _summary(f: UploadedFile, rows: list[CleanRow]) -> CleanSummary:
     return CleanSummary(
         total=len(rows),
         clean=clean,
+        auto_clean=clean - manual_clean,
+        manual_clean=manual_clean,
         errors=len(rows) - clean,
         auto_fixed=auto_fixed,
         tags=[
@@ -577,9 +609,22 @@ def _filter_rows(
     tags: list[str] | None = None,
     contains_col: str | None = None,
     contains_val: str | None = None,
+    manual: dict[int, str] | None = None,
 ) -> list[CleanRow]:
+    """Narrow the cleaned rows to one Review tab, then apply the tag/value filters.
+
+    Views: all · error (needs review) · clean (both clean tabs) ·
+    auto_clean (clean with no human touch) · manual_clean (a reviewer edited the
+    row or kept it as-is, sending it into the clean set)."""
     if view in ("clean", "error"):
         rows = [r for r in rows if r.status == view]
+    elif view in ("auto_clean", "manual_clean"):
+        touched = manual or {}
+        want_manual = view == "manual_clean"
+        rows = [
+            r for r in rows
+            if r.status == "clean" and ((r.index in touched) == want_manual)
+        ]
     if tag:
         rows = [r for r in rows if any(i.get("tag") == tag for i in r.issues)]
     if tags:
@@ -859,13 +904,22 @@ def fill_column(
 
 _XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
+# Sheet 1's name mirrors the Review tab the download came from.
+_SHEET_NAMES = {
+    "error": "Flagged rows",
+    "auto_clean": "Auto cleaned",
+    "manual_clean": "Manual cleaned",
+    "clean": "Clean rows",
+    "all": "Rows",
+}
+
 # Review-sheet cell highlights (Excel "Bad/Neutral" palette, filter-safe fills).
 _FILL_EDITED = PatternFill("solid", fgColor="FFEB9C")  # yellow  -> human-corrected
 _FILL_ERROR = PatternFill("solid", fgColor="FFC7CE")   # red     -> unresolved error
 _HEADER_FONT = Font(bold=True)
 
 
-def _cell_review(r: "CleanRow") -> tuple[dict[str, str], dict[str, str], str]:
+def _cell_review(r: "CleanRow", manual_kind: str | None = None) -> tuple[dict[str, str], dict[str, str], str]:
     """Per-cell review annotations for one row.
 
     Returns (edited, errored, issue_text):
@@ -874,6 +928,9 @@ def _cell_review(r: "CleanRow") -> tuple[dict[str, str], dict[str, str], str]:
       - errored[col]  -> highlight the cell red; value is the error message.
       - issue_text    -> one-line, per-column summary of what was resolved / is still
         open, for the "Issue" column so a reviewer sees exactly what happened.
+
+    `manual_kind` ("edited" / "kept") comes from the reviewer's actions, so a row
+    kept as-is is called out even though none of its cells changed.
     """
     edited: dict[str, str] = {}
     errored: dict[str, str] = {}
@@ -891,10 +948,17 @@ def _cell_review(r: "CleanRow") -> tuple[dict[str, str], dict[str, str], str]:
             new = i.get("value") or ""
             edited[col] = f"'{old}' -> '{new}'"
             notes.append(f"{col}: '{old}' -> '{new}' (manually corrected)")
+    if manual_kind == "kept" and not notes:
+        notes.append("Kept as-is by a reviewer (values unchanged)")
     return edited, errored, "; ".join(notes)
 
 
-def _write_review_sheet(ws, rows: list["CleanRow"], cols: list[str]) -> None:
+def _write_review_sheet(
+    ws,
+    rows: list["CleanRow"],
+    cols: list[str],
+    manual: dict[int, str] | None = None,
+) -> None:
     """Second workbook sheet: the same rows as the export, but with every cell a
     human touched highlighted yellow and every unresolved error highlighted red,
     plus an "Issue" column spelling out precisely what was resolved per cell.
@@ -903,6 +967,7 @@ def _write_review_sheet(ws, rows: list["CleanRow"], cols: list[str]) -> None:
     six-figure-row file is produced in seconds with a few MB of memory — styled
     cells are `WriteOnlyCell`s built inline (random-access `ws.cell()` is not
     available in write-only mode)."""
+    manual = manual or {}
     ws.freeze_panes = "A2"  # write-only: must be set before the first append
     header = []
     for value in ("Row", *cols, "Issue"):
@@ -916,7 +981,7 @@ def _write_review_sheet(ws, rows: list["CleanRow"], cols: list[str]) -> None:
     )
     ws.append(header)
     for r in rows:
-        edited, errored, issue_text = _cell_review(r)
+        edited, errored, issue_text = _cell_review(r, manual.get(r.index))
         line = [r.index + 1]
         for col in cols:
             value = r.values.get(col, "")
@@ -951,12 +1016,15 @@ def export_rows(
 
     Honors the exact same view/tag/tags/sort/value-filter the Review grid is
     showing, so "download" gives the user the very set of rows in front of them
-    (e.g. all rows sorted by Singer descending, or only rows containing one
-    singer). The sheet is built in memory and streamed — nothing hits disk.
+    (e.g. all rows sorted by Singer descending, or only the manually cleaned
+    rows). Every tab exports the same two sheets: a plain one, and a review sheet
+    where each cell a human changed is highlighted. The workbook is built in
+    memory and streamed — nothing hits disk.
     """
     f = _get_file_or_404(file_id, user, db)
+    manual = _manual_kinds(f)
     rows = _filter_rows(
-        build_rows(f), view, tag, _split_csv(tags), contains_col, contains_val
+        build_rows(f), view, tag, _split_csv(tags), contains_col, contains_val, manual
     )
     rows = _sort_rows(rows, sort, dir)
     cols = _active_columns(f)
@@ -967,7 +1035,7 @@ def export_rows(
     # few MB, and scales to six-figure row counts well under any gateway timeout.
     wb = Workbook(write_only=True)
     # Sheet 1 — the plain export we already ship.
-    ws = wb.create_sheet("Flagged rows" if view == "error" else "Rows")
+    ws = wb.create_sheet(_SHEET_NAMES.get(view, "Rows"))
     ws.append(["Row", *cols, "Issues"])
     for r in rows:
         issues = "; ".join(
@@ -979,7 +1047,7 @@ def export_rows(
 
     # Sheet 2 — same rows, but human-edited cells highlighted (yellow) and
     # unresolved errors (red), with an Issue column, so the export can be reviewed.
-    _write_review_sheet(wb.create_sheet("Review (edits)"), rows, cols)
+    _write_review_sheet(wb.create_sheet("Review (edits)"), rows, cols, manual)
 
     buf = io.BytesIO()
     wb.save(buf)

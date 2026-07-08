@@ -193,13 +193,19 @@ class ExportRequest(BaseModel):
     sheet_name: Annotated[str, Field(max_length=100)] | None = None
 
 
+# The most rows one preview request may return. The master dataset is unbounded,
+# so "All" in the UI means "as many as this" — enough to scroll a whole branch's
+# worth of records, small enough that neither the query nor the browser stalls.
+PREVIEW_MAX_ROWS = 2000
+
+
 class PreviewRequest(BaseModel):
     """A read-only, paginated look at the (optionally filtered) master data."""
 
     filters: FilterMap = {}
     # Columns to show; empty = every master column, in canonical order.
     columns: Annotated[list[ShortText], Field(max_length=100)] = []
-    limit: Annotated[int, Field(ge=1, le=200)] = 25
+    limit: Annotated[int, Field(ge=1, le=PREVIEW_MAX_ROWS)] = 50
     offset: Annotated[int, Field(ge=0)] = 0
 
 
@@ -329,6 +335,8 @@ class TagGroup(BaseModel):
 class CleanSummary(BaseModel):
     total: int
     clean: int
+    auto_clean: int = 0  # clean rows the tool fixed on its own
+    manual_clean: int = 0  # clean rows a reviewer edited or kept as-is
     errors: int
     auto_fixed: int  # number of cells auto-corrected
     tags: list[TagGroup]  # error types (needs review), grouped
@@ -385,6 +393,9 @@ class CleanRowOut(BaseModel):
     status: str
     values: dict
     issues: list
+    # How a human moved this row into the clean set: "edited" (values changed),
+    # "kept" (accepted as-is), or None when the tool cleaned it on its own.
+    manual_kind: str | None = None
 
 
 class ReviewOut(BaseModel):
