@@ -115,8 +115,10 @@ export default function ReviewStep({ file, onCommitted }) {
   const [activeTags, setActiveTags] = useState([]); // applied fix-tag filters
   const [sortCol, setSortCol] = useState("");
   const [sortDir, setSortDir] = useState("asc");
-  const [containsCol, setContainsCol] = useState(""); // "show unique" value filter
-  const [containsVal, setContainsVal] = useState("");
+  // Per-column value filters picked from the "show unique" panels: { col: [values] }.
+  // Values match ANY within a column (OR); columns are AND'd together, so
+  // UPC "256" and Label "svf" narrow the grid at the same time.
+  const [valueFilters, setValueFilters] = useState({});
   // Draft selections inside the open filter modal (committed on "Apply filter").
   const [draftTags, setDraftTags] = useState([]);
   const [draftSortCol, setDraftSortCol] = useState("");
@@ -139,9 +141,15 @@ export default function ReviewStep({ file, onCommitted }) {
   const [uniqueCol, setUniqueCol] = useState(null);
   const [uniqueValues, setUniqueValues] = useState([]);
   const [uniqueLoading, setUniqueLoading] = useState(false);
-  const [uniqueSearch, setUniqueSearch] = useState("");
+  const [uniqueSearch, setUniqueSearch] = useState(""); // what the user is typing
+  const [uniqueSearchQ, setUniqueSearchQ] = useState(""); // debounced, sent to server
+  const [uniqueNonce, setUniqueNonce] = useState(0); // bump to force a re-fetch
   const [uniqueSortKey, setUniqueSortKey] = useState("count"); // count | value
   const [uniqueSortDir, setUniqueSortDir] = useState("desc"); // asc | desc
+
+  // --- Tab-wide grid search (works in every view tab) ---
+  const [search, setSearch] = useState(""); // what the user is typing
+  const [searchQ, setSearchQ] = useState(""); // debounced, sent to server
 
   // --- Merge values (alias a variant into a canonical value) ---
   const [mergeMode, setMergeMode] = useState(false); // checkboxes shown in panel
@@ -149,6 +157,12 @@ export default function ReviewStep({ file, onCommitted }) {
   const [mergeTarget, setMergeTarget] = useState(""); // canonical value
   const [mergeBusy, setMergeBusy] = useState(false);
   const [mergeConfirm, setMergeConfirm] = useState(null); // {from:[], to, count}
+
+  // --- "Find similar to merge": similarity-assisted variant discovery ---
+  const [similarBase, setSimilarBase] = useState(null); // value we're clustering around
+  const [similarMatches, setSimilarMatches] = useState([]); // [{value,count,ratio}]
+  const [similarLoading, setSimilarLoading] = useState(false);
+  const [similarRatio, setSimilarRatio] = useState(0.9); // strictness (0.9/0.8/0.7)
 
   // --- Synced horizontal scrollbar shown above the grid ---
   const gridScrollRef = useRef(null);
@@ -165,6 +179,9 @@ export default function ReviewStep({ file, onCommitted }) {
 
   // --- Send manually-cleaned rows back to "Needs review" ---
   const [revertConfirm, setRevertConfirm] = useState(null); // {rows, all, count}
+
+  // --- Delete rows from the file (any tab) ---
+  const [dropConfirm, setDropConfirm] = useState(null); // {rows, all, count}
 
   // --- Near-duplicate review (cleaned row vs. an existing master record) ---
   const [checkingConflicts, setCheckingConflicts] = useState(false);
@@ -249,13 +266,13 @@ export default function ReviewStep({ file, onCommitted }) {
         qs.set("sort", sortCol);
         qs.set("dir", sortDir);
       }
-      if (containsCol && containsVal) {
-        qs.set("contains_col", containsCol);
-        qs.set("contains_val", containsVal);
+      if (Object.keys(valueFilters).length) {
+        qs.set("filters", JSON.stringify(valueFilters));
       }
+      if (searchQ) qs.set("q", searchQ);
       return qs.toString();
     },
-    [view, page, apiPageSize, activeTag, activeTags, sortCol, sortDir, containsCol, containsVal]
+    [view, page, apiPageSize, activeTag, activeTags, sortCol, sortDir, valueFilters, searchQ]
   );
 
   const applyPayload = useCallback((d) => {
@@ -301,6 +318,47 @@ export default function ReviewStep({ file, onCommitted }) {
   useEffect(() => {
     loadProfile();
   }, [loadProfile]);
+
+  // Debounce the tab-wide search box: only hit the server ~300ms after typing
+  // stops, and jump back to page 1 for the new result set.
+  useEffect(() => {
+    const t = setTimeout(() => {
+      setSearchQ(search.trim());
+      setPage(0);
+    }, 300);
+    return () => clearTimeout(t);
+  }, [search]);
+
+  // Debounce the unique-panel search the same way — it drives a server fetch so a
+  // value beyond the display cap is still found (accurate, not just the top N).
+  useEffect(() => {
+    const t = setTimeout(() => setUniqueSearchQ(uniqueSearch.trim()), 250);
+    return () => clearTimeout(t);
+  }, [uniqueSearch]);
+
+  // Fetch the open column's unique values, server-side searched. Re-runs when the
+  // column, the debounced search, or the post-merge nonce changes. A cancel flag
+  // drops a stale response so fast typing can't leave the wrong list showing.
+  useEffect(() => {
+    if (!uniqueCol) return;
+    let cancelled = false;
+    setUniqueLoading(true);
+    (async () => {
+      try {
+        const qs = new URLSearchParams({ column: uniqueCol });
+        if (uniqueSearchQ) qs.set("q", uniqueSearchQ);
+        const d = await api(`/api/files/${file.id}/columns/unique?${qs.toString()}`);
+        if (!cancelled) setUniqueValues(d.values || []);
+      } catch (e) {
+        if (!cancelled) setError(e.message);
+      } finally {
+        if (!cancelled) setUniqueLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [uniqueCol, uniqueSearchQ, uniqueNonce, file.id]);
 
   // Keep the top scrollbar's width in sync with the grid's full content width so
   // the user can scroll horizontally from the top without reaching the bottom.
@@ -602,47 +660,58 @@ export default function ReviewStep({ file, onCommitted }) {
     setEditConfirmed(false);
   }
 
-  async function openUnique(col) {
+  // Open the panel and clear its search. The values are loaded by the fetch effect
+  // (keyed on uniqueCol/search/nonce), so the list stays in sync with the search.
+  function openUnique(col) {
     setHeaderMenuCol(null);
-    setUniqueCol(col);
-    setUniqueSearch("");
     setUniqueValues([]);
+    setUniqueSearch("");
+    setUniqueSearchQ("");
     resetMerge();
-    setUniqueLoading(true);
-    try {
-      const d = await api(
-        `/api/files/${file.id}/columns/unique?column=${encodeURIComponent(col)}`
-      );
-      setUniqueValues(d.values || []);
-    } catch (e) {
-      setError(e.message);
-    } finally {
-      setUniqueLoading(false);
-    }
+    setUniqueCol(col);
   }
 
-  // Refresh the unique-values list (after a merge the variant is gone and the
-  // canonical value's count has grown).
-  async function reloadUnique(col) {
-    try {
-      const d = await api(
-        `/api/files/${file.id}/columns/unique?column=${encodeURIComponent(col)}`
-      );
-      setUniqueValues(d.values || []);
-    } catch (e) {
-      setError(e.message);
-    }
-  }
-
+  // Toggle one value of the current column in/out of the filter set. Columns are
+  // AND'd; values within a column OR — and picking a value on a second column
+  // adds to the filter instead of replacing the first, so filters stack.
   function pickUnique(value) {
-    setContainsCol(uniqueCol);
-    setContainsVal(value);
+    setValueFilters((f) => {
+      const cur = f[uniqueCol] || [];
+      const next = cur.includes(value)
+        ? cur.filter((v) => v !== value)
+        : [...cur, value];
+      const out = { ...f };
+      if (next.length) out[uniqueCol] = next;
+      else delete out[uniqueCol]; // last value removed -> drop the column filter
+      return out;
+    });
+    setPage(0);
+  }
+
+  // Drop one value from a column's filter (used by the active-filter chips).
+  function removeValueFilter(col, value) {
+    setValueFilters((f) => {
+      const next = (f[col] || []).filter((v) => v !== value);
+      const out = { ...f };
+      if (next.length) out[col] = next;
+      else delete out[col];
+      return out;
+    });
+    setPage(0);
+  }
+
+  // Clear every value on one column (the unique panel's "Clear" foot).
+  function clearColumnFilter(col) {
+    setValueFilters((f) => {
+      const out = { ...f };
+      delete out[col];
+      return out;
+    });
     setPage(0);
   }
 
   function clearContains() {
-    setContainsCol("");
-    setContainsVal("");
+    setValueFilters({});
     setPage(0);
   }
 
@@ -663,6 +732,9 @@ export default function ReviewStep({ file, onCommitted }) {
     setMergePicked(new Set());
     setMergeTarget("");
     setMergeConfirm(null);
+    setSimilarBase(null);
+    setSimilarMatches([]);
+    setSimilarLoading(false);
   }
 
   function toggleMergePick(value) {
@@ -673,6 +745,46 @@ export default function ReviewStep({ file, onCommitted }) {
     });
     // Seed the canonical target with the highest-count pick for convenience.
     setMergeTarget((t) => t || value);
+  }
+
+  // Similarity-assisted merge: pick a value, and the panel surfaces just its close
+  // variants (pre-checked) so the reviewer merges an accurate cluster in one go —
+  // then the same preview + confirm as a manual merge.
+  async function loadSimilar(base, ratio) {
+    setSimilarLoading(true);
+    setError("");
+    try {
+      const qs = new URLSearchParams({
+        column: uniqueCol,
+        value: base,
+        min_ratio: String(ratio),
+      });
+      const d = await api(`/api/files/${file.id}/columns/similar?${qs.toString()}`);
+      const matches = d.matches || [];
+      setSimilarMatches(matches);
+      // Pre-check every suggestion — they all clear the threshold; the reviewer
+      // unticks any false positive before confirming.
+      setMergePicked(new Set(matches.map((m) => m.value)));
+    } catch (e) {
+      setError(e.message);
+      setSimilarMatches([]);
+    } finally {
+      setSimilarLoading(false);
+    }
+  }
+
+  function findSimilar(value) {
+    setMergeMode(true);
+    setMergeConfirm(null);
+    setSimilarBase(value);
+    setMergeTarget(value); // the clicked value is the canonical keeper by default
+    loadSimilar(value, similarRatio);
+  }
+
+  // Re-run the similarity search when the reviewer loosens/tightens the strictness.
+  function changeSimilarRatio(ratio) {
+    setSimilarRatio(ratio);
+    if (similarBase) loadSimilar(similarBase, ratio);
   }
 
   // Step 1: ask the server how many rows the merge would touch, then confirm.
@@ -712,7 +824,7 @@ export default function ReviewStep({ file, onCommitted }) {
       );
       applyPayload(d);
       resetMerge();
-      await reloadUnique(col);
+      setUniqueNonce((n) => n + 1); // re-fetch the unique list (variant is gone now)
     } catch (err) {
       setError(err.message);
     } finally {
@@ -769,6 +881,40 @@ export default function ReviewStep({ file, onCommitted }) {
     try {
       const qs = buildQs(true) + (req.all ? "&select_all=true" : "");
       const d = await api(`/api/files/${file.id}/revert?${qs}`, {
+        method: "POST",
+        body: { rows: req.rows },
+      });
+      applyPayload(d);
+      clearSelection();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      if (single !== null) markPending(single, false);
+      setBusy(false);
+    }
+  }
+
+  // --- Delete rows from the file --------------------------------------------
+  // Removes rows outright (excluded from every tab, from exports, and from the
+  // master save). Destructive, so every entry point routes through a confirm.
+  // `all` deletes every row in the current filtered view (across all pages).
+  function askDrop(rowIndexes, all = false) {
+    const count = all ? total : rowIndexes.length;
+    if (count > 0) setDropConfirm({ rows: all ? [] : rowIndexes, all, count });
+  }
+
+  async function confirmDrop() {
+    const req = dropConfirm;
+    if (!req) return;
+    setDropConfirm(null);
+    // A single row deleted from its own button gets an inline spinner.
+    const single = !req.all && req.rows.length === 1 ? req.rows[0] : null;
+    if (single !== null) markPending(single, true);
+    setBusy(true);
+    setError("");
+    try {
+      const qs = buildQs(true) + (req.all ? "&select_all=true" : "");
+      const d = await api(`/api/files/${file.id}/drop?${qs}`, {
         method: "POST",
         body: { rows: req.rows },
       });
@@ -902,7 +1048,10 @@ export default function ReviewStep({ file, onCommitted }) {
     if (activeTag) parts.push(tagLabel[activeTag] || activeTag);
     activeTags.forEach((t) => parts.push(tagLabel[t] || t));
     if (sortCol) parts.push(`${sortCol}_${sortDir}`);
-    if (containsCol && containsVal) parts.push(`${containsCol}_${containsVal}`);
+    Object.entries(valueFilters).forEach(([col, vals]) =>
+      parts.push(`${col}_${vals.join("_")}`)
+    );
+    if (searchQ) parts.push(`search_${searchQ}`);
     const descriptor = parts.map(slug).filter(Boolean).join("_");
     const base =
       slug((file.original_name || "file").replace(/\.[^.]+$/, "")) || "file";
@@ -924,10 +1073,10 @@ export default function ReviewStep({ file, onCommitted }) {
         qs.set("sort", sortCol);
         qs.set("dir", sortDir);
       }
-      if (containsCol && containsVal) {
-        qs.set("contains_col", containsCol);
-        qs.set("contains_val", containsVal);
+      if (Object.keys(valueFilters).length) {
+        qs.set("filters", JSON.stringify(valueFilters));
       }
+      if (searchQ) qs.set("q", searchQ);
       await download(`/api/files/${file.id}/export?${qs.toString()}`, name);
     } catch (err) {
       setError(err.message);
@@ -1137,6 +1286,25 @@ export default function ReviewStep({ file, onCommitted }) {
             Add column value
           </button>
         </div>
+        {/* Tab-wide search — available in every view tab. Matches any column
+            (substring), so pasting a value from the grid jumps straight to it. */}
+        <div className="grid-search" title="Search across all columns in this tab">
+          <Icon name="search" size={14} />
+          <input
+            placeholder="Search this tab…"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+          />
+          {search && (
+            <button
+              className="grid-search-clear"
+              onClick={() => setSearch("")}
+              title="Clear search"
+            >
+              <Icon name="x" size={12} />
+            </button>
+          )}
+        </div>
         <button
           className="btn sm primary"
           onClick={downloadFiltered}
@@ -1211,9 +1379,18 @@ export default function ReviewStep({ file, onCommitted }) {
       )}
 
       {/* Active-filter chips — what's currently applied via the Filters popup */}
-      {(activeTags.length > 0 || sortCol || containsCol) && (
+      {(activeTags.length > 0 || sortCol || Object.keys(valueFilters).length > 0 || searchQ) && (
         <div className="review-toolbar">
           <div className="active-filters">
+            {searchQ && (
+              <span className="filter-chip alt">
+                <Icon name="search" size={12} />
+                “{searchQ}”
+                <button onClick={() => setSearch("")} title="Clear search">
+                  <Icon name="x" size={11} />
+                </button>
+              </span>
+            )}
             {activeTags.map((t) => (
               <span className="filter-chip" key={t}>
                 {tagLabel[t] || t}
@@ -1237,15 +1414,25 @@ export default function ReviewStep({ file, onCommitted }) {
                 </button>
               </span>
             )}
-            {containsCol && (
-              <span className="filter-chip alt">
-                {containsCol}: “{containsVal}”
-                <button onClick={clearContains} title="Clear value filter">
-                  <Icon name="x" size={11} />
-                </button>
-              </span>
+            {/* One chip per picked value, so several stacked filters are all visible
+                and each removable on its own. */}
+            {Object.entries(valueFilters).flatMap(([col, vals]) =>
+              vals.map((v) => (
+                <span className="filter-chip alt" key={`${col}::${v}`}>
+                  {col}: “{v}”
+                  <button
+                    onClick={() => removeValueFilter(col, v)}
+                    title="Clear this value filter"
+                  >
+                    <Icon name="x" size={11} />
+                  </button>
+                </span>
+              ))
             )}
-            <button className="link-btn" onClick={() => { clearFilters(); clearContains(); }}>
+            <button
+              className="link-btn"
+              onClick={() => { clearFilters(); clearContains(); setSearch(""); }}
+            >
               Clear all
             </button>
           </div>
@@ -1417,6 +1604,16 @@ export default function ReviewStep({ file, onCommitted }) {
                             </button>
                           </>
                         ) : null}
+                        {/* Delete this row — available on any resting row in any tab. */}
+                        {!pendingRows.has(row.row_index) && !hasDraft && (
+                          <button
+                            className="cell-drop"
+                            title="Remove this row from the file (excluded from export and the master save)"
+                            onClick={() => askDrop([row.row_index])}
+                          >
+                            <Icon name="trash" size={12} />
+                          </button>
+                        )}
                       </td>
                       {displayColumns.map((c, ci) => {
                         const issue = errs[c];
@@ -1546,10 +1743,10 @@ export default function ReviewStep({ file, onCommitted }) {
               Clear
             </button>
             {view === "manual_clean" ? (
-              // These rows are already clean — the only useful bulk action is to
-              // undo the manual clean and send them back to the review queue.
+              // These rows are already clean — offer to undo the manual clean and
+              // send them back to the review queue.
               <button
-                className="btn danger sm"
+                className="btn sm"
                 onClick={() => askRevert([...selected], selectAllPages)}
                 disabled={busy}
                 title="Undo the manual clean and put these rows back in Needs review"
@@ -1563,6 +1760,17 @@ export default function ReviewStep({ file, onCommitted }) {
                 {busy ? "Keeping…" : "Keep selected as-is"}
               </button>
             )}
+            {/* Delete works in every tab — remove the selected rows from the file
+                entirely (they won't export or reach the master save). */}
+            <button
+              className="btn danger sm"
+              onClick={() => askDrop([...selected], selectAllPages)}
+              disabled={busy}
+              title="Remove the selected rows from the file (excluded from export and the master save)"
+            >
+              <Icon name="trash" size={15} />
+              {busy ? "Removing…" : `Remove selected`}
+            </button>
           </div>
         </div>
       )}
@@ -1851,6 +2059,38 @@ export default function ReviewStep({ file, onCommitted }) {
         </div>
       )}
 
+      {/* Delete confirmation — removing rows is destructive, so confirm first */}
+      {dropConfirm && (
+        <div className="save-overlay" onClick={() => setDropConfirm(null)}>
+          <div className="confirm-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="confirm-spark danger">
+              <Icon name="trash" size={22} />
+            </div>
+            <h3>
+              Remove {dropConfirm.count} row{dropConfirm.count === 1 ? "" : "s"} from the
+              file?
+            </h3>
+            <p className="muted">
+              {dropConfirm.all
+                ? "Every row in the current filtered view (across all pages) is removed."
+                : "The selected row(s) are removed."}{" "}
+              <strong>They’re excluded from every tab, from Excel exports, and from
+              the master save.</strong>{" "}
+              You can bring them back by re-uploading the file.
+            </p>
+            <div className="confirm-actions">
+              <button className="btn sm" onClick={() => setDropConfirm(null)} disabled={busy}>
+                Cancel
+              </button>
+              <button className="btn danger sm" onClick={confirmDrop} disabled={busy}>
+                <Icon name="trash" size={15} />
+                {busy ? "Removing…" : `Remove ${dropConfirm.count} row${dropConfirm.count === 1 ? "" : "s"}`}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Unique-values side panel — click a value to filter the grid by it */}
       {uniqueCol && (
         <div className="unique-overlay" onClick={() => setUniqueCol(null)}>
@@ -1903,7 +2143,9 @@ export default function ReviewStep({ file, onCommitted }) {
 
             {/* Merge variants into one canonical value — tick the duplicates,
                 type the correct spelling, confirm. Applies to every matching cell
-                (pipe-aware) but only when the reviewer confirms. */}
+                (pipe-aware) but only when the reviewer confirms. Two ways in:
+                manual (tick from the whole list) or "find similar" (auto-cluster a
+                value's close spelling variants). */}
             <div className="unique-mergebar">
               <button
                 className={`btn sm ${mergeMode ? "primary" : ""}`}
@@ -1913,14 +2155,65 @@ export default function ReviewStep({ file, onCommitted }) {
                 <Icon name="check" size={14} />
                 {mergeMode ? "Cancel merge" : "Merge values"}
               </button>
-              {mergeMode && (
+              {mergeMode && !similarBase && (
                 <span className="muted small">
-                  Tick the variants to merge, then choose the correct value.
+                  Tick the variants to merge, then choose the correct value — or click
+                  the ✦ on any value to auto-find its close matches.
                 </span>
+              )}
+              {similarBase && (
+                <div className="similar-controls">
+                  <span className="muted small">
+                    Close matches of <strong>“{similarBase}”</strong>
+                  </span>
+                  <label className="similar-strict">
+                    Match
+                    <select
+                      value={similarRatio}
+                      onChange={(e) => changeSimilarRatio(Number(e.target.value))}
+                    >
+                      <option value={0.9}>≥ 90% (strict)</option>
+                      <option value={0.8}>≥ 80%</option>
+                      <option value={0.7}>≥ 70% (loose)</option>
+                    </select>
+                  </label>
+                </div>
               )}
             </div>
             <div className="unique-list">
-              {uniqueLoading ? (
+              {similarBase ? (
+                // "Find similar" mode: show only the close matches (checkboxes),
+                // most-similar first, each with its similarity %.
+                similarLoading ? (
+                  <p className="muted small" style={{ padding: "0.75rem" }}>
+                    Finding similar values…
+                  </p>
+                ) : similarMatches.length === 0 ? (
+                  <p className="muted small" style={{ padding: "0.75rem" }}>
+                    No values within this similarity. Try a looser match above.
+                  </p>
+                ) : (
+                  similarMatches.map((u) => (
+                    <label
+                      className={`unique-row${mergePicked.has(u.value) ? " picked" : ""}`}
+                      key={u.value}
+                      title="Merge this variant into the canonical value"
+                    >
+                      <input
+                        type="checkbox"
+                        className="row-check"
+                        checked={mergePicked.has(u.value)}
+                        onChange={() => toggleMergePick(u.value)}
+                      />
+                      <span className="unique-val">{u.value}</span>
+                      <span className="unique-ratio" title="How closely this matches">
+                        {Math.round(u.ratio * 100)}%
+                      </span>
+                      <span className="unique-count">{u.count}</span>
+                    </label>
+                  ))
+                )
+              ) : uniqueLoading ? (
                 <p className="muted small" style={{ padding: "0.75rem" }}>
                   Loading…
                 </p>
@@ -1969,19 +2262,30 @@ export default function ReviewStep({ file, onCommitted }) {
                     ));
                   }
                   return shown.map((u) => (
-                    <button
+                    <div
                       className={`unique-row${
-                        containsCol === uniqueCol && containsVal === u.value
+                        (valueFilters[uniqueCol] || []).includes(u.value)
                           ? " active"
                           : ""
                       }`}
                       key={u.value}
-                      onClick={() => pickUnique(u.value)}
-                      title="Filter the grid to rows containing this value"
                     >
-                      <span className="unique-val">{u.value}</span>
+                      <button
+                        className="unique-pick"
+                        onClick={() => pickUnique(u.value)}
+                        title="Filter the grid to rows with this value (pick several to combine)"
+                      >
+                        <span className="unique-val">{u.value}</span>
+                      </button>
+                      <button
+                        className="unique-similar-btn"
+                        onClick={() => findSimilar(u.value)}
+                        title={`Find & merge values similar to “${u.value}”`}
+                      >
+                        <Icon name="sparkles" size={13} />
+                      </button>
                       <span className="unique-count">{u.count}</span>
-                    </button>
+                    </div>
                   ));
                 })()
               )}
@@ -2011,12 +2315,16 @@ export default function ReviewStep({ file, onCommitted }) {
                 </button>
               </div>
             )}
-            {!mergeMode && containsCol === uniqueCol && containsVal && (
+            {!mergeMode && (valueFilters[uniqueCol] || []).length > 0 && (
               <div className="unique-foot">
                 <span className="muted small">
-                  Filtering by “{containsVal}”
+                  Filtering by {valueFilters[uniqueCol].length} value
+                  {valueFilters[uniqueCol].length === 1 ? "" : "s"} in {uniqueCol}
                 </span>
-                <button className="link-btn" onClick={clearContains}>
+                <button
+                  className="link-btn"
+                  onClick={() => clearColumnFilter(uniqueCol)}
+                >
                   Clear
                 </button>
               </div>

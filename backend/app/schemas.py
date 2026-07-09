@@ -387,6 +387,22 @@ class UniqueValuesOut(BaseModel):
     values: list[UniqueValue]  # most-common first, capped
 
 
+class SimilarValue(BaseModel):
+    value: str
+    count: int  # how many rows carry it
+    ratio: float  # 0..1 similarity to the queried value (1 = identical)
+
+
+class SimilarValuesOut(BaseModel):
+    """Distinct values of a column that closely resemble a queried value, ranked by
+    similarity. Powers the "find similar to merge" flow so a reviewer sees a value's
+    spelling variants (e.g. Shreya Ghosal / Ghoshal / Ghoshall) without scrolling."""
+
+    column: str
+    value: str  # the value the matches were compared against
+    matches: list[SimilarValue]  # most-similar first, capped
+
+
 class CleanRowOut(BaseModel):
     # Rows are computed in memory, identified by their position in the file.
     row_index: int
@@ -440,6 +456,14 @@ class RowsRevert(BaseModel):
     """Undo the manual clean on rows: drop their "keep as-is" acceptance and any
     reviewer corrections, so they fall back to Needs review. Empty `rows` +
     `select_all=true` means: revert every row in the current filtered view."""
+
+    rows: Annotated[list[int], Field(max_length=1_000_000)] = []
+
+
+class RowsDrop(BaseModel):
+    """Remove rows from the file entirely: they're excluded from every tab, from
+    exports, and from the master save. Empty `rows` + `select_all=true` means:
+    remove every row in the current filtered view."""
 
     rows: Annotated[list[int], Field(max_length=1_000_000)] = []
 

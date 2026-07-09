@@ -1,3 +1,4 @@
+import difflib
 import io
 import json
 from collections import Counter
@@ -54,7 +55,10 @@ from ..schemas import (
     RowEdit,
     RowsAccept,
     RowsBatchEdit,
+    RowsDrop,
     RowsRevert,
+    SimilarValue,
+    SimilarValuesOut,
     TagGroup,
     UniqueValue,
     UniqueValuesOut,
@@ -400,17 +404,18 @@ def _review_payload(
     tags: list[str] | None = None,
     sort: str | None = None,
     direction: str = "asc",
-    contains_col: str | None = None,
-    contains_val: str | None = None,
+    value_filters: dict[str, list[str]] | None = None,
+    query: str | None = None,
 ) -> "ReviewOut":
     """Build the full Review payload (summary + profile + page of rows). Shared by
     GET /review and the edit/accept mutations so they each return in one trip.
 
-    Optional `tags` (match ANY), `contains_col`/`contains_val` (value filter) and
-    `sort`/`direction` are applied server-side so they hold across pages."""
+    Optional `tags` (match ANY), `value_filters` (per-column value filters, AND'd
+    across columns), `query` (tab-wide text search) and `sort`/`direction` are
+    applied server-side so they hold across pages."""
     rows = build_rows(f)
     manual = _manual_kinds(f)
-    filtered = _filter_rows(rows, view, tag, tags, contains_col, contains_val, manual)
+    filtered = _filter_rows(rows, view, tag, tags, value_filters, manual, query)
     filtered = _sort_rows(filtered, sort, direction)
     total = len(filtered)
     page = max(0, page)
@@ -612,20 +617,56 @@ def _build_profile(columns: list[str], rows: list[CleanRow]) -> DataProfile:
     )
 
 
+def _parse_value_filters(raw: str | None) -> dict[str, list[str]]:
+    """Parse the `filters` query param — JSON like {"UPC": ["256"], "Label": ["svf"]}
+    — into a {column: [values]} map. Within a column the values match ANY (OR);
+    across columns a row must satisfy EVERY column (AND). Malformed input is treated
+    as no filter so a bad param never 500s the grid."""
+    if not raw:
+        return {}
+    try:
+        data = json.loads(raw)
+    except (ValueError, TypeError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    out: dict[str, list[str]] = {}
+    for col, vals in data.items():
+        if not isinstance(col, str):
+            continue
+        if isinstance(vals, str):
+            vals = [vals]
+        if not isinstance(vals, (list, tuple)):
+            continue
+        clean = [str(v) for v in vals if str(v).strip() != ""]
+        if clean:
+            out[col] = clean
+    return out
+
+
 def _filter_rows(
     rows: list[CleanRow],
     view: str | None,
     tag: str | None,
     tags: list[str] | None = None,
-    contains_col: str | None = None,
-    contains_val: str | None = None,
+    value_filters: dict[str, list[str]] | None = None,
     manual: dict[int, str] | None = None,
+    query: str | None = None,
 ) -> list[CleanRow]:
     """Narrow the cleaned rows to one Review tab, then apply the tag/value filters.
 
     Views: all · error (needs review) · clean (both clean tabs) ·
     auto_clean (clean with no human touch) · manual_clean (a reviewer edited the
-    row or kept it as-is, sending it into the clean set)."""
+    row or kept it as-is, sending it into the clean set).
+
+    `value_filters` is a {column: [values]} map from the unique-values panels:
+    values ANY-match within a column (OR), and every listed column must match (AND),
+    so "UPC = 256" and "Label = svf" narrow the grid together instead of replacing
+    one another.
+
+    `query` is the tab-wide search box: keep a row when ANY of its cell values
+    contains the text (case-insensitive substring), so a value copied from the grid
+    finds its row in whichever tab is open."""
     if view in ("clean", "error"):
         rows = [r for r in rows if r.status == view]
     elif view in ("auto_clean", "manual_clean"):
@@ -640,15 +681,27 @@ def _filter_rows(
     if tags:
         wanted = set(tags)
         rows = [r for r in rows if any(i.get("tag") in wanted for i in r.issues)]
-    if contains_col and contains_val:
-        # Exact-value filter: the value was picked from the column's unique-values
-        # panel, so match the whole cell (or one exact piped piece for name fields)
-        # — never a substring, or picking UPC "256" would also drag in "12564".
-        target = contains_val.strip().lower()
-        rows = [
-            r for r in rows
-            if any(p.lower() == target for p in _value_pieces(contains_col, r.values.get(contains_col, "")))
-        ]
+    if value_filters:
+        # Exact-value filters picked from each column's unique-values panel: match
+        # the whole cell (or one exact piped piece for name fields) — never a
+        # substring, or picking UPC "256" would also drag in "12564". Each column
+        # narrows the set in turn (AND); its values match ANY (OR).
+        for col, vals in value_filters.items():
+            targets = {v.strip().lower() for v in vals}
+            rows = [
+                r for r in rows
+                if any(
+                    p.lower() in targets
+                    for p in _value_pieces(col, r.values.get(col, ""))
+                )
+            ]
+    if query:
+        needle = query.strip().lower()
+        if needle:
+            rows = [
+                r for r in rows
+                if any(needle in (v or "").lower() for v in r.values.values())
+            ]
     return rows
 
 
@@ -688,8 +741,8 @@ def review(
     tags: str | None = None,
     sort: str | None = None,
     dir: str = "asc",
-    contains_col: str | None = None,
-    contains_val: str | None = None,
+    filters: str | None = None,
+    q: str | None = None,
     page: int = 0,
     page_size: int = 50,
     include_profile: bool = True,
@@ -700,8 +753,9 @@ def review(
     profile, and the requested page of rows (filtered by view/tag).
 
     `tags` is a comma-joined list of cleaning/error tags (match ANY);
-    `contains_col`/`contains_val` filter by a column value; `sort`/`dir` order
-    the rows. All apply server-side so they hold across pages.
+    `filters` is a JSON {column: [values]} map of value filters (AND'd across
+    columns); `sort`/`dir` order the rows. All apply server-side so they hold
+    across pages.
 
     Cleaning is computed once and memoised, so this is a single fast call no
     matter how the user pages or filters — and the big row blob is read at most
@@ -710,7 +764,7 @@ def review(
     return _review_payload(
         f, view, tag, page, page_size, include_profile,
         tags=_split_csv(tags), sort=sort, direction=dir,
-        contains_col=contains_col, contains_val=contains_val,
+        value_filters=_parse_value_filters(filters), query=q,
     )
 
 
@@ -741,12 +795,18 @@ _UNIQUE_CAP = 1000  # bound the side-panel payload for very high-cardinality col
 def column_unique_values(
     file_id: int,
     column: str,
+    q: str | None = None,
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
     """The distinct values of one column (most-common first), pipe-split for name
     fields so each individual singer/composer is counted separately. Powers the
-    per-column "Show unique values" side panel. Runs over the cached rows."""
+    per-column "Show unique values" side panel. Runs over the cached rows.
+
+    `q` narrows to values containing that substring (case-insensitive). The search
+    runs over the FULL value set BEFORE the display cap, so a specific value copied
+    from the grid is always found — even in a very high-cardinality column (e.g. a
+    UPC) where it would otherwise fall outside the top `_UNIQUE_CAP` by count."""
     f = _get_file_or_404(file_id, user, db)
     if column not in _active_columns(f):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Column not found")
@@ -754,10 +814,93 @@ def column_unique_values(
     for r in build_rows(f):
         for piece in _value_pieces(column, r.values.get(column, "")):
             counts[piece] += 1
+    needle = (q or "").strip().lower()
+    if needle:
+        matched = [(v, n) for v, n in counts.items() if needle in v.lower()]
+        total_distinct = len(matched)
+        # Sort the matches most-common first, then cap the payload.
+        top = sorted(matched, key=lambda vn: (-vn[1], vn[0]))[:_UNIQUE_CAP]
+    else:
+        total_distinct = len(counts)
+        top = counts.most_common(_UNIQUE_CAP)
     return UniqueValuesOut(
         column=column,
-        total_distinct=len(counts),
-        values=[UniqueValue(value=v, count=n) for v, n in counts.most_common(_UNIQUE_CAP)],
+        total_distinct=total_distinct,
+        values=[UniqueValue(value=v, count=n) for v, n in top],
+    )
+
+
+def _token_sorted(s: str) -> str:
+    """Words re-ordered alphabetically, so word-order variants of the same name
+    ("Kumar Sanu" vs "Sanu Kumar") still compare as near-identical."""
+    return " ".join(sorted(s.split()))
+
+
+def _similarity(a: str, b: str) -> float:
+    """0..1 resemblance of two already-normalized strings. Uses the character
+    ratio, and — for multi-word values — the stronger of that and a token-sorted
+    ratio, so a swapped word order doesn't tank the score."""
+    direct = difflib.SequenceMatcher(None, a, b).ratio()
+    if " " in a or " " in b:
+        return max(direct, difflib.SequenceMatcher(None, _token_sorted(a), _token_sorted(b)).ratio())
+    return direct
+
+
+@router.get("/api/files/{file_id}/columns/similar", response_model=SimilarValuesOut)
+def column_similar_values(
+    file_id: int,
+    column: str,
+    value: str,
+    min_ratio: float = 0.7,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Distinct values of `column` that closely resemble `value`, ranked by
+    similarity (most-similar first). Powers the "find similar to merge" flow: pick a
+    value and the panel surfaces just its likely spelling variants (e.g. Shreya
+    Ghosal / Ghoshal / Ghoshall), so the reviewer merges an accurate cluster instead
+    of hunting through the whole list.
+
+    `min_ratio` is the similarity floor (0..1). Values that normalize identically to
+    `value` are omitted — merging them would be a no-op."""
+    f = _get_file_or_404(file_id, user, db)
+    if column not in _active_columns(f):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Column not found")
+    base = _dedup_norm(value)
+    if not base:
+        return SimilarValuesOut(column=column, value=value, matches=[])
+    threshold = min(max(min_ratio, 0.0), 1.0)
+
+    counts: Counter = Counter()
+    for r in build_rows(f):
+        for piece in _value_pieces(column, r.values.get(column, "")):
+            counts[piece] += 1
+
+    multi = " " in base
+    base_sorted = _token_sorted(base) if multi else base
+    sm = difflib.SequenceMatcher(None, "", base, autojunk=False)
+    matches: list[tuple[str, int, float]] = []
+    for v, n in counts.items():
+        nv = _dedup_norm(v)
+        if not nv or nv == base:
+            continue  # identical once normalized -> nothing to merge
+        sm.set_seq1(nv)
+        # real_quick_ratio is a cheap upper bound: skip clear non-matches fast.
+        ratio = sm.ratio() if sm.real_quick_ratio() >= threshold else 0.0
+        if multi:
+            ratio = max(
+                ratio,
+                difflib.SequenceMatcher(None, _token_sorted(nv), base_sorted).ratio(),
+            )
+        if ratio >= threshold:
+            matches.append((v, n, ratio))
+
+    matches.sort(key=lambda x: (-x[2], -x[1], x[0]))
+    matches = matches[:_UNIQUE_CAP]
+    return SimilarValuesOut(
+        column=column,
+        value=value,
+        matches=[SimilarValue(value=v, count=n, ratio=round(r, 4)) for v, n, r in matches],
     )
 
 
@@ -829,8 +972,8 @@ def remap_column_value(
     tags: str | None = None,
     sort: str | None = None,
     dir: str = "asc",
-    contains_col: str | None = None,
-    contains_val: str | None = None,
+    filters: str | None = None,
+    q: str | None = None,
     page: int = 0,
     page_size: int = 50,
     include_profile: bool = True,
@@ -867,7 +1010,7 @@ def remap_column_value(
     return _review_payload(
         f, view, tag, page, page_size, include_profile,
         tags=_split_csv(tags), sort=sort, direction=dir,
-        contains_col=contains_col, contains_val=contains_val,
+        value_filters=_parse_value_filters(filters), query=q,
     )
 
 
@@ -881,8 +1024,8 @@ def fill_column(
     tags: str | None = None,
     sort: str | None = None,
     dir: str = "asc",
-    contains_col: str | None = None,
-    contains_val: str | None = None,
+    filters: str | None = None,
+    q: str | None = None,
     page: int = 0,
     page_size: int = 50,
     include_profile: bool = True,
@@ -910,7 +1053,7 @@ def fill_column(
     return _review_payload(
         f, view, tag, page, page_size, include_profile,
         tags=_split_csv(tags), sort=sort, direction=dir,
-        contains_col=contains_col, contains_val=contains_val,
+        value_filters=_parse_value_filters(filters), query=q,
     )
 
 
@@ -1018,8 +1161,8 @@ def export_rows(
     tags: str | None = None,
     sort: str | None = None,
     dir: str = "asc",
-    contains_col: str | None = None,
-    contains_val: str | None = None,
+    filters: str | None = None,
+    q: str | None = None,
     filename: str | None = None,
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
@@ -1035,8 +1178,9 @@ def export_rows(
     """
     f = _get_file_or_404(file_id, user, db)
     manual = _manual_kinds(f)
+    value_filters = _parse_value_filters(filters)
     rows = _filter_rows(
-        build_rows(f), view, tag, _split_csv(tags), contains_col, contains_val, manual
+        build_rows(f), view, tag, _split_csv(tags), value_filters, manual, q
     )
     rows = _sort_rows(rows, sort, dir)
     cols = _active_columns(f)
@@ -1075,8 +1219,10 @@ def export_rows(
         parts = ["flagged_rows" if view == "error" else f"{view}_rows"]
         if sort:
             parts.append(f"by_{sort}_{dir}")
-        if contains_col and contains_val:
-            parts.append(f"{contains_col}_{contains_val}")
+        for col, vals in value_filters.items():
+            parts.append(f"{col}_{'_'.join(vals)}")
+        if q and q.strip():
+            parts.append(f"search_{q.strip()}")
         out_name = safe_filename("_".join(parts) + f"_file{file_id}.xlsx")
     return StreamingResponse(
         buf,
@@ -1129,8 +1275,8 @@ def edit_rows(
     tags: str | None = None,
     sort: str | None = None,
     dir: str = "asc",
-    contains_col: str | None = None,
-    contains_val: str | None = None,
+    filters: str | None = None,
+    q: str | None = None,
     page: int = 0,
     page_size: int = 50,
     include_profile: bool = True,
@@ -1172,7 +1318,7 @@ def edit_rows(
     return _review_payload(
         f, view, tag, page, page_size, include_profile,
         tags=_split_csv(tags), sort=sort, direction=dir,
-        contains_col=contains_col, contains_val=contains_val,
+        value_filters=_parse_value_filters(filters), query=q,
     )
 
 
@@ -1185,8 +1331,8 @@ def accept_rows(
     tags: str | None = None,
     sort: str | None = None,
     dir: str = "asc",
-    contains_col: str | None = None,
-    contains_val: str | None = None,
+    filters: str | None = None,
+    q: str | None = None,
     page: int = 0,
     page_size: int = 50,
     include_profile: bool = True,
@@ -1212,7 +1358,7 @@ def accept_rows(
     return _review_payload(
         f, view, tag, page, page_size, include_profile,
         tags=_split_csv(tags), sort=sort, direction=dir,
-        contains_col=contains_col, contains_val=contains_val,
+        value_filters=_parse_value_filters(filters), query=q,
     )
 
 
@@ -1225,8 +1371,8 @@ def revert_rows(
     tags: str | None = None,
     sort: str | None = None,
     dir: str = "asc",
-    contains_col: str | None = None,
-    contains_val: str | None = None,
+    filters: str | None = None,
+    q: str | None = None,
     select_all: bool = False,
     page: int = 0,
     page_size: int = 50,
@@ -1250,7 +1396,7 @@ def revert_rows(
             r.index
             for r in _filter_rows(
                 build_rows(f), view, tag, _split_csv(tags),
-                contains_col, contains_val, manual,
+                _parse_value_filters(filters), manual, q,
             )
             if r.index in manual
         }
@@ -1272,7 +1418,66 @@ def revert_rows(
     return _review_payload(
         f, view, tag, page, page_size, include_profile,
         tags=_split_csv(tags), sort=sort, direction=dir,
-        contains_col=contains_col, contains_val=contains_val,
+        value_filters=_parse_value_filters(filters), query=q,
+    )
+
+
+@router.post("/api/files/{file_id}/drop", response_model=ReviewOut)
+def drop_rows(
+    file_id: int,
+    payload: RowsDrop,
+    view: str = "all",
+    tag: str | None = None,
+    tags: str | None = None,
+    sort: str | None = None,
+    dir: str = "asc",
+    filters: str | None = None,
+    q: str | None = None,
+    select_all: bool = False,
+    page: int = 0,
+    page_size: int = 50,
+    include_profile: bool = True,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Remove rows from the file entirely — the reviewer's explicit delete.
+
+    A dropped row is excluded from every review tab, from exports, and from the
+    master save (it never reaches the master dataset). Works in ANY tab and on any
+    row, so a reviewer can weed out unwanted records — e.g. filter to a value, then
+    delete the whole matching set.
+
+    `select_all=true` deletes every row in the current filtered view (honoring the
+    active view/tag/tags/value-filters/search) instead of the explicit `rows` list,
+    so a filter-then-delete removes exactly what's on screen across all pages."""
+    f = _get_file_or_404(file_id, user, db)
+    if select_all:
+        targets = {
+            r.index
+            for r in _filter_rows(
+                build_rows(f), view, tag, _split_csv(tags),
+                _parse_value_filters(filters), _manual_kinds(f), q,
+            )
+        }
+    else:
+        # Bound to the file's real rows so a stale/oob index can't poison `dropped`.
+        base = _warm_base_values(f)
+        n = len(base) if base is not None else len(f.data)
+        targets = {i for i in payload.rows if 0 <= i < n}
+
+    if targets:
+        dropped = set(f.dropped or [])
+        dropped.update(targets)
+        f.dropped = sorted(dropped)
+        db.commit()
+        # Removing rows changes the row set (and cross-row duplicate flags), which
+        # the in-place fast paths can't express — rebuild from the new signature.
+        _invalidate(file_id)
+
+    return _review_payload(
+        f, view, tag, page, page_size, include_profile,
+        tags=_split_csv(tags), sort=sort, direction=dir,
+        value_filters=_parse_value_filters(filters), query=q,
     )
 
 

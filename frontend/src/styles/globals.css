@@ -2162,6 +2162,22 @@ input::placeholder {
   border-color: var(--red);
   color: var(--red);
 }
+/* "Delete row" per-row button — quiet outline, red on hover since it removes the
+   row from the file entirely. Available on any resting row, in every tab. */
+.cell-drop {
+  margin-left: 0.4rem;
+  border: 1px solid var(--border-strong);
+  background: var(--surface);
+  color: var(--muted);
+  border-radius: 5px;
+  padding: 0.1rem 0.25rem;
+  cursor: pointer;
+  vertical-align: middle;
+}
+.cell-drop:hover {
+  border-color: var(--red);
+  color: var(--red);
+}
 
 /* Row selection */
 .row-check {
@@ -2863,6 +2879,48 @@ input::placeholder {
   flex: none;
 }
 
+/* Tab-wide search box in the view bar — grows to fill the gap between the
+   tabs/filters on the left and the Download button on the right. */
+.grid-search {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  flex: 1 1 220px;
+  min-width: 180px;
+  max-width: 420px;
+  padding: 0.4rem 0.65rem;
+  border: 1px solid var(--border-strong);
+  border-radius: 9px;
+  color: var(--muted);
+  background: var(--surface, transparent);
+}
+.grid-search:focus-within {
+  border-color: var(--brand);
+}
+.grid-search input {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  background: none;
+  font: inherit;
+  color: var(--text);
+  outline: none;
+}
+.grid-search-clear {
+  display: inline-grid;
+  place-items: center;
+  border: none;
+  background: none;
+  padding: 2px;
+  cursor: pointer;
+  color: var(--muted);
+  border-radius: 6px;
+}
+.grid-search-clear:hover {
+  color: var(--text);
+  background: var(--hover, rgba(0, 0, 0, 0.06));
+}
+
 /* Filter toolbar + active-filter chips */
 .review-toolbar {
   display: flex;
@@ -3345,6 +3403,73 @@ input::placeholder {
   color: var(--muted);
   font-size: 0.74rem;
   font-weight: 700;
+}
+/* Normal-mode row is a wrapper: a big filter click-target plus a small ✦ that
+   opens the "find similar to merge" flow for that value. */
+.unique-pick {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  border: none;
+  background: none;
+  padding: 0;
+  margin: 0;
+  cursor: pointer;
+  text-align: left;
+  font: inherit;
+  color: inherit;
+}
+.unique-similar-btn {
+  flex: none;
+  display: inline-grid;
+  place-items: center;
+  border: 1px solid transparent;
+  background: none;
+  color: var(--muted);
+  border-radius: 6px;
+  padding: 2px 4px;
+  cursor: pointer;
+}
+.unique-similar-btn:hover {
+  color: var(--brand);
+  border-color: var(--brand);
+}
+/* Similarity % badge in "find similar" mode. */
+.unique-ratio {
+  flex: none;
+  padding: 0.05rem 0.4rem;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--brand) 14%, var(--surface));
+  color: var(--brand);
+  font-size: 0.72rem;
+  font-weight: 700;
+}
+.similar-controls {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  flex: 1;
+  min-width: 0;
+}
+.similar-strict {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+.similar-strict select {
+  border: 1px solid var(--border-strong);
+  border-radius: 7px;
+  padding: 0.2rem 0.35rem;
+  font: inherit;
+  color: var(--text);
+  background: var(--surface);
+  cursor: pointer;
 }
 .unique-foot {
   display: flex;
