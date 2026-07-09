@@ -641,11 +641,13 @@ def _filter_rows(
         wanted = set(tags)
         rows = [r for r in rows if any(i.get("tag") in wanted for i in r.issues)]
     if contains_col and contains_val:
+        # Exact-value filter: the value was picked from the column's unique-values
+        # panel, so match the whole cell (or one exact piped piece for name fields)
+        # — never a substring, or picking UPC "256" would also drag in "12564".
         target = contains_val.strip().lower()
         rows = [
             r for r in rows
             if any(p.lower() == target for p in _value_pieces(contains_col, r.values.get(contains_col, "")))
-            or target in (r.values.get(contains_col, "") or "").lower()
         ]
     return rows
 
