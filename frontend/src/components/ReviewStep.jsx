@@ -42,9 +42,12 @@ const TAG_COLORS = {
   combined_columns: "#0ea5e9",
   derived_lead_artist: "#0284c7",
   filled_constant: "#0369a1",
-  // Human change (merge / inline edit / bulk set) — distinct indigo so a cell you
+  // Human change (inline edit / bulk set) — distinct indigo so a cell you
   // manipulated stands out from the tool's own green auto-fixes.
   corrected: "#6366f1",
+  // Value-merge (remap) — a violet sibling of `corrected`: still a human change,
+  // but filterable on its own as "Merged value".
+  merged: "#8b5cf6",
 };
 const tagColor = (t) => TAG_COLORS[t] || "#6b7280";
 
@@ -1443,6 +1446,9 @@ export default function ReviewStep({ file, onCommitted }) {
       <div className="grid-legend">
         <span><i className="lg-dot green" /> Auto-fixed (labelled by what changed)</span>
         <span><i className="lg-dot" style={{ background: tagColor("corrected") }} /> Manually corrected</span>
+        {(summary?.fix_tags || []).some((t) => t.tag === "merged") && (
+          <span><i className="lg-dot" style={{ background: tagColor("merged") }} /> Merged value</span>
+        )}
         <span><i className="lg-dot red" /> Needs your review</span>
         <span><i className="lg-dot blank" /> Empty cell</span>
         <span className="muted small lg-hint">
@@ -1665,16 +1671,18 @@ export default function ReviewStep({ file, onCommitted }) {
                         const fix = fixes[c];
                         if (fix) {
                           const from = (fix.original || "").trim();
-                          // A cell a human changed gets a stronger wash + border than the
-                          // tool's own green auto-fixes, so it's obvious on a later review.
-                          const manual = fix.tag === "corrected";
+                          // A cell a human changed (typed edit or value-merge) gets a
+                          // stronger wash + border than the tool's own green auto-fixes,
+                          // so it's obvious on a later review.
+                          const manual = fix.tag === "corrected" || fix.tag === "merged";
                           return (
                             <td
                               key={c}
                               className={`cell-fixed${manual ? " cell-manual" : ""}${frozenClass(ci)}`}
                               style={{ "--tag": tagColor(fix.tag), ...pin }}
                               title={`${
-                                manual ? "Manually corrected" : tagLabel[fix.tag] || "Auto-fixed"
+                                tagLabel[fix.tag] ||
+                                (manual ? "Manually corrected" : "Auto-fixed")
                               }${from ? ` — was “${from}”` : ""}`}
                             >
                               <span className="fixed-val">
@@ -2261,32 +2269,38 @@ export default function ReviewStep({ file, onCommitted }) {
                       </label>
                     ));
                   }
-                  return shown.map((u) => (
-                    <div
-                      className={`unique-row${
-                        (valueFilters[uniqueCol] || []).includes(u.value)
-                          ? " active"
-                          : ""
-                      }`}
-                      key={u.value}
-                    >
-                      <button
-                        className="unique-pick"
-                        onClick={() => pickUnique(u.value)}
-                        title="Filter the grid to rows with this value (pick several to combine)"
+                  return shown.map((u) => {
+                    const checked = (valueFilters[uniqueCol] || []).includes(
+                      u.value
+                    );
+                    return (
+                      <div
+                        className={`unique-row${checked ? " active" : ""}`}
+                        key={u.value}
                       >
-                        <span className="unique-val">{u.value}</span>
-                      </button>
-                      <button
-                        className="unique-similar-btn"
-                        onClick={() => findSimilar(u.value)}
-                        title={`Find & merge values similar to “${u.value}”`}
-                      >
-                        <Icon name="sparkles" size={13} />
-                      </button>
-                      <span className="unique-count">{u.count}</span>
-                    </div>
-                  ));
+                        <label
+                          className="unique-pick"
+                          title="Tick to filter the grid by this value — pick several to see them all at once"
+                        >
+                          <input
+                            type="checkbox"
+                            className="row-check"
+                            checked={checked}
+                            onChange={() => pickUnique(u.value)}
+                          />
+                          <span className="unique-val">{u.value}</span>
+                        </label>
+                        <button
+                          className="unique-similar-btn"
+                          onClick={() => findSimilar(u.value)}
+                          title={`Find & merge values similar to “${u.value}”`}
+                        >
+                          <Icon name="sparkles" size={13} />
+                        </button>
+                        <span className="unique-count">{u.count}</span>
+                      </div>
+                    );
+                  });
                 })()
               )}
             </div>

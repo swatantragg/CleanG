@@ -170,7 +170,8 @@ def _signature(f: UploadedFile) -> str:
 
 
 def _mark_corrected(
-    base_values: dict, cleaned: dict, issues: list[dict], override: dict
+    base_values: dict, cleaned: dict, issues: list[dict], override: dict,
+    merged_cols: set | None = None,
 ) -> list[dict]:
     """Flag every cell a human changed (merge / inline edit / bulk set) so the
     Review grid highlights it as "Manually corrected".
@@ -180,7 +181,12 @@ def _mark_corrected(
     `original`, so hovering shows what it was. Cells still in error keep their
     error flag (it already highlights and explains the problem); any cosmetic
     auto-fix flag on a corrected cell is superseded by this stronger marker.
+
+    `merged_cols` are the columns on this row whose value came from a value-merge
+    (remap) rather than a typed edit — those get the distinct "merged" tag so they
+    can be filtered as "Merged value", separate from hand corrections.
     """
+    merged_cols = merged_cols or set()
     edited = {
         col for col in override
         if (cleaned.get(col) or "") != (base_values.get(col) or "")
@@ -192,16 +198,36 @@ def _mark_corrected(
     for col in edited:
         if col in err_cols:
             continue
+        is_merge = col in merged_cols
         kept.append({
             "column": col,
             "action": "fixed",
-            "tag": "corrected",
-            "message": "Manually corrected in review.",
+            "tag": "merged" if is_merge else "corrected",
+            "message": "Merged value in review." if is_merge
+            else "Manually corrected in review.",
             "value": cleaned.get(col, ""),
             "original": base_values.get(col, ""),
             "cosmetic": False,
         })
     return kept
+
+
+def _merged_cols(f: UploadedFile, idx: int) -> set:
+    """Columns on row `idx` whose correction came from a value-merge (remap)."""
+    return set((f.merged_cells or {}).get(str(idx), {}).keys())
+
+
+def _forget_merged(merged: dict, row_index: int, cols) -> None:
+    """A later hand edit or revert supersedes a merge on these cells — drop their
+    merge-origin marks in place so they stop showing as "Merged value"."""
+    key = str(row_index)
+    row = merged.get(key)
+    if not row:
+        return
+    for c in cols:
+        row.pop(c, None)
+    if not row:
+        merged.pop(key, None)
 
 
 def _entry(f: UploadedFile) -> dict:
@@ -223,7 +249,9 @@ def _entry(f: UploadedFile) -> dict:
         override = corrections.get(str(r.index))
         if override:
             cleaned, issues = revalidate({**r.values, **override})
-            issues = _mark_corrected(r.values, cleaned, issues, override)
+            issues = _mark_corrected(
+                r.values, cleaned, issues, override, _merged_cols(f, r.index)
+            )
             r = CleanRow(index=r.index, values=cleaned, issues=issues)
         rows.append(r)
 
@@ -296,7 +324,7 @@ def _edit_in_place(f: UploadedFile, changed: set[int]) -> bool:
             return False
         override = corrections.get(str(idx)) or {}
         cleaned, issues = revalidate({**bv, **override})
-        issues = _mark_corrected(bv, cleaned, issues, override)
+        issues = _mark_corrected(bv, cleaned, issues, override, _merged_cols(f, idx))
         rows[pos[idx]] = CleanRow(index=idx, values=cleaned, issues=issues)
 
     # An edit can change cross-row duplicate flags; re-run the cheap (no-DB) pass.
@@ -993,6 +1021,7 @@ def remap_column_value(
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Nothing to remap.")
 
     corrections = dict(f.corrections or {})
+    merged = {k: dict(v) for k, v in (f.merged_cells or {}).items()}
     changed: set[int] = set()
     for r in build_rows(f):
         cur = r.values.get(column, "")
@@ -1001,8 +1030,10 @@ def remap_column_value(
             override = dict(corrections.get(str(r.index), {}))
             override[column] = new
             corrections[str(r.index)] = override
+            merged.setdefault(str(r.index), {})[column] = True
             changed.add(r.index)
     f.corrections = corrections
+    f.merged_cells = merged
     db.commit()
     # Recompute only the rows the merge rewrote; full rebuild only if cache is cold.
     if not _edit_in_place(f, changed):
@@ -1098,11 +1129,12 @@ def _cell_review(r: "CleanRow", manual_kind: str | None = None) -> tuple[dict[st
             msg = i.get("message") or i.get("tag") or "error"
             errored[col] = msg
             notes.append(f"{col}: {msg} (unresolved)")
-        elif i.get("tag") == "corrected":
+        elif i.get("tag") in ("corrected", "merged"):
             old = i.get("original") or ""
             new = i.get("value") or ""
             edited[col] = f"'{old}' -> '{new}'"
-            notes.append(f"{col}: '{old}' -> '{new}' (manually corrected)")
+            kind = "merged value" if i.get("tag") == "merged" else "manually corrected"
+            notes.append(f"{col}: '{old}' -> '{new}' ({kind})")
     if manual_kind == "kept" and not notes:
         notes.append("Kept as-is by a reviewer (values unchanged)")
     return edited, errored, "; ".join(notes)
@@ -1255,6 +1287,11 @@ def edit_row(
     existing.update(payload.values)
     corrections[str(row_index)] = existing
     f.corrections = corrections
+    # A typed edit on a previously-merged cell supersedes the merge origin.
+    if f.merged_cells:
+        merged = {k: dict(v) for k, v in f.merged_cells.items()}
+        _forget_merged(merged, row_index, payload.values.keys())
+        f.merged_cells = merged
     db.commit()
     # Recompute just this row in place; fall back to a full rebuild if cache is cold.
     if not _edit_in_place(f, {row_index}):
@@ -1295,6 +1332,7 @@ def edit_rows(
     # data blob just to read its length); fall back to len(data) if cache is cold.
     base_values = _warm_base_values(f)
     n = len(base_values) if base_values is not None else len(f.data)
+    merged = {k: dict(v) for k, v in f.merged_cells.items()} if f.merged_cells else None
     changed: set[int] = set()
     for idx_str, values in payload.edits.items():
         try:
@@ -1310,7 +1348,12 @@ def edit_rows(
         existing.update(values)
         corrections[idx_str] = existing
         changed.add(idx)
+        # A typed edit on a previously-merged cell supersedes the merge origin.
+        if merged is not None:
+            _forget_merged(merged, idx, values.keys())
     f.corrections = corrections
+    if merged is not None:
+        f.merged_cells = merged
     db.commit()
     # Recompute only the edited rows in place; full rebuild only if cache is cold.
     if not _edit_in_place(f, changed):
@@ -1409,6 +1452,12 @@ def revert_rows(
             k: v for k, v in (f.corrections or {}).items()
             if _row_key(k) not in targets
         }
+        # Reverting a row re-cleans it from scratch — forget any merge origin too.
+        if f.merged_cells:
+            f.merged_cells = {
+                k: v for k, v in f.merged_cells.items()
+                if _row_key(k) not in targets
+            }
         db.commit()
         # Re-clean only the reverted rows in the warm cache; the values change, so
         # this can't use the cheaper _accept_in_place path.

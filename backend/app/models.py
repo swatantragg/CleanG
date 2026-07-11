@@ -132,6 +132,11 @@ class UploadedFile(Base):
     # rows where that column is empty (existing values are never overwritten), so
     # a whole-batch value (e.g. Revenue Share / Split) can be broadcast at once.
     constants: Mapped[dict] = mapped_column(JSON, default=dict)
+    # Cells whose correction came from a value-merge (remap) rather than a hand
+    # edit, so the review grid can tag them "Merged value" separately from a typed
+    # correction. Same shape as `corrections`: {"<row_index>": {"<column>": true}}.
+    # A later hand edit or revert on the cell clears its mark.
+    merged_cells: Mapped[dict] = mapped_column(JSON, default=dict)
     status: Mapped[FileStatus] = mapped_column(
         Enum(FileStatus, name="file_status"), default=FileStatus.uploaded
     )

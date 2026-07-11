@@ -132,6 +132,7 @@ FIX_LABELS = {
     "derived_lead_artist": "Filled Lead Artist",
     "filled_constant": "Filled blank cell",
     "corrected": "Manually corrected",
+    "merged": "Merged value",
 }
 
 # Default fix category per field type (overridden by "removed_junk" when a

@@ -63,6 +63,11 @@ def _migrate(db) -> None:
         "ALTER TABLE uploaded_files "
         "ADD COLUMN IF NOT EXISTS constants JSONB NOT NULL DEFAULT '{}'::jsonb"
     ))
+    # Merge-origin marks for review cells (tagged "Merged value" vs a hand edit).
+    db.execute(text(
+        "ALTER TABLE uploaded_files "
+        "ADD COLUMN IF NOT EXISTS merged_cells JSONB NOT NULL DEFAULT '{}'::jsonb"
+    ))
     # Forced-password-rotation flag, added for databases created before it existed.
     db.execute(text(
         "ALTER TABLE users "
