@@ -16,4 +16,4 @@ redis==8.0.1
 # Daily-report scheduler. tzdata ships the IANA tz database so "Asia/Kolkata"
 # resolves inside the slim image (which has no system zoneinfo).
 APScheduler==3.10.4
-tzdata==2024.1
+tzdata==2026.3
