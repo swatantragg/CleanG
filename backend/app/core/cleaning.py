@@ -47,6 +47,10 @@ _LABEL_JOIN = re.compile(r"\s*[,&]\s*|\s+and\s+", re.IGNORECASE)
 # kept, then the rest are added from Singer / Composer / Lyricist. A person
 # credited in more than one role (e.g. singer AND composer) appears only once.
 LEAD_ARTIST_SOURCES = ("Lead Artist", "Singer", "Composer", "Lyricist")
+# The credit columns that CONTRIBUTE names to the roll-up. Lead Artist is the
+# destination, so it is deliberately absent: a name sitting only there came from a
+# mapped Lead Artist column, not from a credit.
+CREDIT_SOURCES = ("Singer", "Composer", "Lyricist")
 
 # Field types that hold one-or-more human names (people). These get per-name
 # Title-casing, comma/pipe splitting and name-shape validation.
@@ -680,6 +684,66 @@ def derive_lead_artist(values: dict) -> str:
     return NAME_SEP.join(out)
 
 
+def _credit_names(values: dict) -> set[str]:
+    """Case-folded set of every name the credit columns of `values` carry."""
+    return {
+        piece.strip().lower()
+        for col in CREDIT_SOURCES
+        for piece in _PIPE_SPLIT.split(values.get(col) or "")
+        if piece.strip()
+    }
+
+
+def _name_pieces(value: str | None) -> list[str]:
+    """An already-cleaned, pipe-joined name cell as its individual names."""
+    return [p.strip() for p in _PIPE_SPLIT.split(value or "") if p.strip()]
+
+
+def _credit_renames(values: dict, previous: dict) -> dict[str, str]:
+    """{old name (folded) -> new name} for credits this edit respelled in place.
+
+    A value-merge rewrites a credit cell name-for-name, so while a column still
+    holds the same number of names, pairing them by position IS the rename. Knowing
+    it lets Lead Artist be respelled where the name already sits — dropping it and
+    letting the roll-up re-append would shove a corrected lead to the end.
+    """
+    renames: dict[str, str] = {}
+    for col in CREDIT_SOURCES:
+        old = _name_pieces(previous.get(col))
+        new = _name_pieces(values.get(col))
+        if len(old) != len(new):
+            continue  # names were added/collapsed, so position no longer pairs
+        for was, now in zip(old, new):
+            if was.lower() != now.lower():
+                renames[was.lower()] = now
+    return renames
+
+
+def _reflow_lead_artist(values: dict, previous: dict) -> None:
+    """Rewrite Lead Artist (in place) so it stops carrying names the credits no
+    longer have, respelling in position where the edit was a rename.
+
+    Lead Artist is a roll-up, so after the first clean it already contains every
+    credit name. Re-deriving unions the stored roll-up back in, so without this a
+    corrected spelling would sit NEXT TO the one it was meant to replace
+    ("Shreya Ghosal | Shreya Ghoshal") — the value-merge would look like it never
+    applied. Names no credit ever supplied (a mapped Lead Artist column) stay put:
+    the roll-up still never drops a human's own value.
+    """
+    stale = _credit_names(previous) - _credit_names(values)
+    if not stale:
+        return
+    renames = _credit_renames(values, previous)
+    kept: list[str] = []
+    for piece in _name_pieces(values.get("Lead Artist")):
+        key = piece.lower()
+        if key not in stale:
+            kept.append(piece)  # still credited (or never was) -> untouched
+        elif key in renames:
+            kept.append(renames[key])
+    values["Lead Artist"] = NAME_SEP.join(kept)
+
+
 def _apply_lead_artist(values: dict, issues: list[dict]) -> None:
     """Fill / verify the Lead Artist column in place from its source credits.
 
@@ -963,12 +1027,24 @@ def _flag_field_conflict(
             })
 
 
-def revalidate(values: dict[str, str]) -> tuple[dict[str, str], list[dict]]:
+def revalidate(
+    values: dict[str, str],
+    previous: dict[str, str] | None = None,
+    manual: set[str] | None = None,
+) -> tuple[dict[str, str], list[dict]]:
     """Re-clean a single record's values (after a human edit or bulk fix).
 
     Returns the cleaned values and the remaining issues. Duplicate detection is
     file-level and not re-run here.
+
+    `previous` is the row as it stood BEFORE the edit and `manual` the columns the
+    human changed. Both keep the Lead Artist roll-up honest across a correction:
+    a name a credit no longer carries is dropped rather than left beside its
+    replacement, and a Lead Artist the human edited directly is kept exactly as
+    typed instead of being re-unioned with the credits it was correcting. Omit
+    them (first clean) and the roll-up behaves as before.
     """
+    manual = manual or set()
     cleaned: dict[str, str] = {}
     issues: list[dict] = []
     for master, raw in values.items():
@@ -982,8 +1058,12 @@ def revalidate(values: dict[str, str]) -> tuple[dict[str, str], list[dict]]:
                 "message": f"{master} is required but empty.",
                 "value": "", "original": str(raw),
             })
-    # Re-derive Lead Artist so an edit to Singer/Composer/Lyricist reflows into it.
-    _apply_lead_artist(cleaned, issues)
+    # Re-derive Lead Artist so an edit to Singer/Composer/Lyricist reflows into it —
+    # unless the human edited Lead Artist itself, in which case their value stands.
+    if "Lead Artist" not in manual:
+        if previous is not None:
+            _reflow_lead_artist(cleaned, previous)
+        _apply_lead_artist(cleaned, issues)
     return cleaned, issues
 
 

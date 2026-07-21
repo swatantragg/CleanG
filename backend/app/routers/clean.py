@@ -248,7 +248,9 @@ def _entry(f: UploadedFile) -> dict:
     for r in base:
         override = corrections.get(str(r.index))
         if override:
-            cleaned, issues = revalidate({**r.values, **override})
+            cleaned, issues = revalidate(
+                {**r.values, **override}, r.values, set(override)
+            )
             issues = _mark_corrected(
                 r.values, cleaned, issues, override, _merged_cols(f, r.index)
             )
@@ -330,7 +332,7 @@ def _edit_in_place(f: UploadedFile, changed: set[int]) -> bool:
         if bv is None or idx in dropped or idx not in pos:
             return False
         override = corrections.get(str(idx)) or {}
-        cleaned, issues = revalidate({**bv, **override})
+        cleaned, issues = revalidate({**bv, **override}, bv, set(override))
         issues = _mark_corrected(bv, cleaned, issues, override, _merged_cols(f, idx))
         rows[pos[idx]] = CleanRow(index=idx, values=cleaned, issues=issues)
 
