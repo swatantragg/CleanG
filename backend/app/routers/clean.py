@@ -452,16 +452,18 @@ def _review_payload(
     direction: str = "asc",
     value_filters: dict[str, list[str]] | None = None,
     query: str | None = None,
+    blanks: str | None = None,
 ) -> "ReviewOut":
     """Build the full Review payload (summary + profile + page of rows). Shared by
     GET /review and the edit/accept mutations so they each return in one trip.
 
     Optional `tags` (match ANY), `value_filters` (per-column value filters, AND'd
-    across columns), `query` (tab-wide text search) and `sort`/`direction` are
-    applied server-side so they hold across pages."""
+    across columns), `query` (tab-wide text search), `blanks` (only rows with an
+    empty cell) and `sort`/`direction` are applied server-side so they hold across
+    pages."""
     rows = build_deleted_rows(f) if view == "deleted" else build_rows(f)
     manual = _manual_kinds(f)
-    filtered = _filter_rows(rows, view, tag, tags, value_filters, manual, query)
+    filtered = _filter_rows(rows, view, tag, tags, value_filters, manual, query, blanks)
     filtered = _sort_rows(filtered, sort, direction)
     total = len(filtered)
     page = max(0, page)
@@ -691,6 +693,11 @@ def _parse_value_filters(raw: str | None) -> dict[str, list[str]]:
     return out
 
 
+def _is_blank(value: object) -> bool:
+    """A cell counts as blank when it holds nothing but whitespace."""
+    return not str(value or "").strip()
+
+
 def _filter_rows(
     rows: list[CleanRow],
     view: str | None,
@@ -699,6 +706,7 @@ def _filter_rows(
     value_filters: dict[str, list[str]] | None = None,
     manual: dict[int, str] | None = None,
     query: str | None = None,
+    blanks: str | None = None,
 ) -> list[CleanRow]:
     """Narrow the cleaned rows to one Review tab, then apply the tag/value filters.
 
@@ -713,7 +721,10 @@ def _filter_rows(
 
     `query` is the tab-wide search box: keep a row when ANY of its cell values
     contains the text (case-insensitive substring), so a value copied from the grid
-    finds its row in whichever tab is open."""
+    finds its row in whichever tab is open.
+
+    `blanks` keeps only rows with an empty cell: "*" for a blank anywhere in the
+    row, or a column name for a blank in that one column."""
     if view in ("clean", "error"):
         rows = [r for r in rows if r.status == view]
     elif view in ("auto_clean", "manual_clean"):
@@ -749,6 +760,12 @@ def _filter_rows(
                 r for r in rows
                 if any(needle in (v or "").lower() for v in r.values.values())
             ]
+    if blanks:
+        # "Rows with blank cells": either anywhere in the row, or in one column.
+        if blanks == "*":
+            rows = [r for r in rows if any(_is_blank(v) for v in r.values.values())]
+        else:
+            rows = [r for r in rows if _is_blank(r.values.get(blanks, ""))]
     return rows
 
 
@@ -790,6 +807,7 @@ def review(
     dir: str = "asc",
     filters: str | None = None,
     q: str | None = None,
+    blanks: str | None = None,
     page: int = 0,
     page_size: int = 50,
     include_profile: bool = True,
@@ -811,7 +829,7 @@ def review(
     return _review_payload(
         f, view, tag, page, page_size, include_profile,
         tags=_split_csv(tags), sort=sort, direction=dir,
-        value_filters=_parse_value_filters(filters), query=q,
+        value_filters=_parse_value_filters(filters), query=q, blanks=blanks,
     )
 
 
@@ -1021,6 +1039,7 @@ def remap_column_value(
     dir: str = "asc",
     filters: str | None = None,
     q: str | None = None,
+    blanks: str | None = None,
     page: int = 0,
     page_size: int = 50,
     include_profile: bool = True,
@@ -1060,7 +1079,7 @@ def remap_column_value(
     return _review_payload(
         f, view, tag, page, page_size, include_profile,
         tags=_split_csv(tags), sort=sort, direction=dir,
-        value_filters=_parse_value_filters(filters), query=q,
+        value_filters=_parse_value_filters(filters), query=q, blanks=blanks,
     )
 
 
@@ -1076,6 +1095,7 @@ def fill_column(
     dir: str = "asc",
     filters: str | None = None,
     q: str | None = None,
+    blanks: str | None = None,
     page: int = 0,
     page_size: int = 50,
     include_profile: bool = True,
@@ -1103,7 +1123,7 @@ def fill_column(
     return _review_payload(
         f, view, tag, page, page_size, include_profile,
         tags=_split_csv(tags), sort=sort, direction=dir,
-        value_filters=_parse_value_filters(filters), query=q,
+        value_filters=_parse_value_filters(filters), query=q, blanks=blanks,
     )
 
 
@@ -1248,6 +1268,7 @@ def export_rows(
     dir: str = "asc",
     filters: str | None = None,
     q: str | None = None,
+    blanks: str | None = None,
     filename: str | None = None,
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
@@ -1266,7 +1287,7 @@ def export_rows(
     value_filters = _parse_value_filters(filters)
     base = build_deleted_rows(f) if view == "deleted" else build_rows(f)
     rows = _filter_rows(
-        base, view, tag, _split_csv(tags), value_filters, manual, q
+        base, view, tag, _split_csv(tags), value_filters, manual, q, blanks
     )
     rows = _sort_rows(rows, sort, dir)
     cols = _active_columns(f)
@@ -1373,6 +1394,7 @@ def edit_rows(
     dir: str = "asc",
     filters: str | None = None,
     q: str | None = None,
+    blanks: str | None = None,
     page: int = 0,
     page_size: int = 50,
     include_profile: bool = True,
@@ -1420,7 +1442,7 @@ def edit_rows(
     return _review_payload(
         f, view, tag, page, page_size, include_profile,
         tags=_split_csv(tags), sort=sort, direction=dir,
-        value_filters=_parse_value_filters(filters), query=q,
+        value_filters=_parse_value_filters(filters), query=q, blanks=blanks,
     )
 
 
@@ -1435,6 +1457,7 @@ def accept_rows(
     dir: str = "asc",
     filters: str | None = None,
     q: str | None = None,
+    blanks: str | None = None,
     page: int = 0,
     page_size: int = 50,
     include_profile: bool = True,
@@ -1460,7 +1483,7 @@ def accept_rows(
     return _review_payload(
         f, view, tag, page, page_size, include_profile,
         tags=_split_csv(tags), sort=sort, direction=dir,
-        value_filters=_parse_value_filters(filters), query=q,
+        value_filters=_parse_value_filters(filters), query=q, blanks=blanks,
     )
 
 
@@ -1475,6 +1498,7 @@ def revert_rows(
     dir: str = "asc",
     filters: str | None = None,
     q: str | None = None,
+    blanks: str | None = None,
     select_all: bool = False,
     page: int = 0,
     page_size: int = 50,
@@ -1526,7 +1550,7 @@ def revert_rows(
     return _review_payload(
         f, view, tag, page, page_size, include_profile,
         tags=_split_csv(tags), sort=sort, direction=dir,
-        value_filters=_parse_value_filters(filters), query=q,
+        value_filters=_parse_value_filters(filters), query=q, blanks=blanks,
     )
 
 
@@ -1541,6 +1565,7 @@ def drop_rows(
     dir: str = "asc",
     filters: str | None = None,
     q: str | None = None,
+    blanks: str | None = None,
     select_all: bool = False,
     page: int = 0,
     page_size: int = 50,
@@ -1585,7 +1610,7 @@ def drop_rows(
     return _review_payload(
         f, view, tag, page, page_size, include_profile,
         tags=_split_csv(tags), sort=sort, direction=dir,
-        value_filters=_parse_value_filters(filters), query=q,
+        value_filters=_parse_value_filters(filters), query=q, blanks=blanks,
     )
 
 
@@ -1600,6 +1625,7 @@ def restore_rows(
     dir: str = "asc",
     filters: str | None = None,
     q: str | None = None,
+    blanks: str | None = None,
     select_all: bool = False,
     page: int = 0,
     page_size: int = 50,
@@ -1639,7 +1665,7 @@ def restore_rows(
     return _review_payload(
         f, view, tag, page, page_size, include_profile,
         tags=_split_csv(tags), sort=sort, direction=dir,
-        value_filters=_parse_value_filters(filters), query=q,
+        value_filters=_parse_value_filters(filters), query=q, blanks=blanks,
     )
 
 

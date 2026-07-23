@@ -3240,6 +3240,17 @@ input::placeholder {
   color: var(--text);
   font: inherit;
 }
+/* Column picker under the "blank cells" checkbox — only shown once it's ticked. */
+.filter-blank-col {
+  width: 100%;
+  margin-top: 0.4rem;
+  padding: 0.5rem 0.6rem;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+}
 .filter-modal-actions {
   display: flex;
   justify-content: flex-end;

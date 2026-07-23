@@ -140,10 +140,14 @@ export default function ReviewStep({ file, onCommitted }) {
   // Values match ANY within a column (OR); columns are AND'd together, so
   // UPC "256" and Label "svf" narrow the grid at the same time.
   const [valueFilters, setValueFilters] = useState({});
+  // Blank-cell filter: "" (off), "*" (a blank anywhere in the row), or a column
+  // name (blank in that one column).
+  const [blankFilter, setBlankFilter] = useState("");
   // Draft selections inside the open filter modal (committed on "Apply filter").
   const [draftTags, setDraftTags] = useState([]);
   const [draftSortCol, setDraftSortCol] = useState("");
   const [draftSortDir, setDraftSortDir] = useState("asc");
+  const [draftBlank, setDraftBlank] = useState("");
 
   // --- Fill a column with a constant value (empties only) ---
   const [showFill, setShowFill] = useState(false);
@@ -274,6 +278,16 @@ export default function ReviewStep({ file, onCommitted }) {
     return m;
   }, [profile]);
 
+  // Per-column blank counts, so the blank-cell filter can say how many rows each
+  // column would bring back before the user picks it.
+  const blankByCol = useMemo(() => {
+    const m = {};
+    (profile?.columns || []).forEach((p) => {
+      m[p.name] = p.blank;
+    });
+    return m;
+  }, [profile]);
+
   // "All" has no page size of its own — ask for more rows than any file holds.
   const apiPageSize = effectivePageSize(pageSize);
   const pages = Math.max(1, Math.ceil(total / apiPageSize));
@@ -299,9 +313,21 @@ export default function ReviewStep({ file, onCommitted }) {
         qs.set("filters", JSON.stringify(valueFilters));
       }
       if (searchQ) qs.set("q", searchQ);
+      if (blankFilter) qs.set("blanks", blankFilter);
       return qs.toString();
     },
-    [view, page, apiPageSize, activeTag, activeTags, sortCol, sortDir, valueFilters, searchQ]
+    [
+      view,
+      page,
+      apiPageSize,
+      activeTag,
+      activeTags,
+      sortCol,
+      sortDir,
+      valueFilters,
+      searchQ,
+      blankFilter,
+    ]
   );
 
   const applyPayload = useCallback((d) => {
@@ -627,6 +653,7 @@ export default function ReviewStep({ file, onCommitted }) {
     setDraftTags(activeTags);
     setDraftSortCol(sortCol);
     setDraftSortDir(sortDir);
+    setDraftBlank(blankFilter);
     setShowFilters(true);
   }
 
@@ -640,6 +667,7 @@ export default function ReviewStep({ file, onCommitted }) {
     setActiveTags(draftTags);
     setSortCol(draftSortCol);
     setSortDir(draftSortDir);
+    setBlankFilter(draftBlank);
     setPage(0);
     setShowFilters(false);
   }
@@ -648,10 +676,18 @@ export default function ReviewStep({ file, onCommitted }) {
     setActiveTags([]);
     setSortCol("");
     setSortDir("asc");
+    setBlankFilter("");
     setDraftTags([]);
     setDraftSortCol("");
     setDraftSortDir("asc");
+    setDraftBlank("");
     setPage(0);
+  }
+
+  // The blank filter is one checkbox plus a column picker: ticking it defaults to
+  // "any column", unticking clears the column too.
+  function toggleDraftBlank() {
+    setDraftBlank((b) => (b ? "" : "*"));
   }
 
   function removeTagFilter(tag) {
@@ -1177,6 +1213,8 @@ export default function ReviewStep({ file, onCommitted }) {
       parts.push(`${col}_${vals.join("_")}`)
     );
     if (searchQ) parts.push(`search_${searchQ}`);
+    if (blankFilter)
+      parts.push(blankFilter === "*" ? "blank_cells" : `blank_${blankFilter}`);
     const descriptor = parts.map(slug).filter(Boolean).join("_");
     const base =
       slug((file.original_name || "file").replace(/\.[^.]+$/, "")) || "file";
@@ -1202,6 +1240,7 @@ export default function ReviewStep({ file, onCommitted }) {
         qs.set("filters", JSON.stringify(valueFilters));
       }
       if (searchQ) qs.set("q", searchQ);
+      if (blankFilter) qs.set("blanks", blankFilter);
       await download(`/api/files/${file.id}/export?${qs.toString()}`, name);
     } catch (err) {
       setError(err.message);
@@ -1405,8 +1444,10 @@ export default function ReviewStep({ file, onCommitted }) {
           <button className="btn sm filter-btn" onClick={openFilters}>
             <Icon name="filter" size={14} />
             Filters
-            {(activeTags.length > 0 || sortCol) && (
-              <span className="filter-n">{activeTags.length + (sortCol ? 1 : 0)}</span>
+            {(activeTags.length > 0 || sortCol || blankFilter) && (
+              <span className="filter-n">
+                {activeTags.length + (sortCol ? 1 : 0) + (blankFilter ? 1 : 0)}
+              </span>
             )}
           </button>
           <button
@@ -1511,7 +1552,11 @@ export default function ReviewStep({ file, onCommitted }) {
       )}
 
       {/* Active-filter chips — what's currently applied via the Filters popup */}
-      {(activeTags.length > 0 || sortCol || Object.keys(valueFilters).length > 0 || searchQ) && (
+      {(activeTags.length > 0 ||
+        sortCol ||
+        blankFilter ||
+        Object.keys(valueFilters).length > 0 ||
+        searchQ) && (
         <div className="review-toolbar">
           <div className="active-filters">
             {searchQ && (
@@ -1541,6 +1586,22 @@ export default function ReviewStep({ file, onCommitted }) {
                     setPage(0);
                   }}
                   title="Remove sort"
+                >
+                  <Icon name="x" size={11} />
+                </button>
+              </span>
+            )}
+            {blankFilter && (
+              <span className="filter-chip">
+                <Icon name="table" size={12} />
+                Blank cells ·{" "}
+                {blankFilter === "*" ? "any column" : blankFilter}
+                <button
+                  onClick={() => {
+                    setBlankFilter("");
+                    setPage(0);
+                  }}
+                  title="Remove the blank-cell filter"
                 >
                   <Icon name="x" size={11} />
                 </button>
@@ -2076,6 +2137,35 @@ export default function ReviewStep({ file, onCommitted }) {
                     </label>
                   ))}
                 </div>
+              )}
+            </div>
+
+            {/* Empty cells — the quickest way to find what still needs filling in */}
+            <div className="filter-section">
+              <label className="filter-section-label">Empty cells</label>
+              <label className="filter-check">
+                <input
+                  type="checkbox"
+                  checked={!!draftBlank}
+                  onChange={toggleDraftBlank}
+                />
+                Show only rows with blank cells
+              </label>
+              {draftBlank && (
+                <select
+                  className="filter-blank-col"
+                  value={draftBlank}
+                  onChange={(e) => setDraftBlank(e.target.value)}
+                  title="Blank anywhere in the row, or blank in one specific column"
+                >
+                  <option value="*">Blank in any column</option>
+                  {columns.map((c) => (
+                    <option key={c} value={c}>
+                      Blank in “{c}”
+                      {blankByCol[c] != null ? ` (${blankByCol[c]})` : ""}
+                    </option>
+                  ))}
+                </select>
               )}
             </div>
 
