@@ -11,6 +11,22 @@ const FROZEN_COLS = 5;
 // visible width, or there'd be nothing left to scroll.
 const FROZEN_MAX_SHARE = 0.6;
 
+// Unique-values panel: drag-resizable width, remembered between opens.
+const UNIQUE_W_KEY = "cleang.uniquePanelWidth";
+const UNIQUE_W_DEFAULT = 380;
+const UNIQUE_W_MIN = 300;
+
+// Never wider than the viewport (minus a sliver of overlay to click away on).
+function clampUniqueWidth(w) {
+  const max = Math.max(UNIQUE_W_MIN, window.innerWidth - 56);
+  return Math.round(Math.min(Math.max(w, UNIQUE_W_MIN), max));
+}
+
+function readUniqueWidth() {
+  const saved = Number(localStorage.getItem(UNIQUE_W_KEY));
+  return clampUniqueWidth(saved > 0 ? saved : UNIQUE_W_DEFAULT);
+}
+
 // A distinct colour per error type so the grid, chips and captions all agree —
 // you can tell at a glance which kind of problem each red cell is.
 const TAG_COLORS = {
@@ -151,6 +167,14 @@ export default function ReviewStep({ file, onCommitted }) {
   const [uniqueNonce, setUniqueNonce] = useState(0); // bump to force a re-fetch
   const [uniqueSortKey, setUniqueSortKey] = useState("count"); // count | value
   const [uniqueSortDir, setUniqueSortDir] = useState("desc"); // asc | desc
+  // Panel width is user-draggable (long names get truncated at the default
+  // width) and remembered across opens/sessions.
+  const [uniqueWidth, setUniqueWidth] = useState(readUniqueWidth);
+  const uniqueListRef = useRef(null);
+  // Last value the reviewer ticked per column, so reopening the panel lands on
+  // it instead of back at the top of a long list.
+  const lastPickRef = useRef({});
+  const scrollToRef = useRef(null); // value to scroll to once the list renders
 
   // --- Tab-wide grid search (works in every view tab) ---
   const [search, setSearch] = useState(""); // what the user is typing
@@ -364,6 +388,35 @@ export default function ReviewStep({ file, onCommitted }) {
       cancelled = true;
     };
   }, [uniqueCol, uniqueSearchQ, uniqueNonce, file.id]);
+
+  // Reopening a panel resumes at the value picked last time instead of the top —
+  // in a few-hundred-value list that scroll back down was the whole cost of
+  // closing the panel. The pending target survives the empty first commit (the
+  // fetch hasn't landed yet) and is dropped only once the rows are on screen, so
+  // searching or re-sorting afterwards doesn't yank the list around.
+  useEffect(() => {
+    const target = scrollToRef.current;
+    if (!uniqueCol || !target || uniqueValues.length === 0) return;
+    const list = uniqueListRef.current;
+    if (!list) return;
+    scrollToRef.current = null;
+    const row = list.querySelector(
+      `[data-uval="${CSS.escape(String(target))}"]`
+    );
+    if (!row) return; // value gone (merged away, or filtered out) — stay at top
+    // Centre it in the list box — scrollIntoView would move the page too.
+    list.scrollTop = Math.max(
+      0,
+      row.offsetTop - list.clientHeight / 2 + row.offsetHeight / 2
+    );
+  }, [uniqueCol, uniqueValues]);
+
+  // A window resize can leave a remembered width wider than the viewport.
+  useEffect(() => {
+    const onResize = () => setUniqueWidth((w) => clampUniqueWidth(w));
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
 
   // Keep the top scrollbar's width in sync with the grid's full content width so
   // the user can scroll horizontally from the top without reaching the bottom.
@@ -673,13 +726,55 @@ export default function ReviewStep({ file, onCommitted }) {
     setUniqueSearch("");
     setUniqueSearchQ("");
     resetMerge();
+    // Resume where the reviewer left off: the value ticked last on this column,
+    // else the first one still filtering it.
+    scrollToRef.current =
+      lastPickRef.current[col] || (valueFilters[col] || [])[0] || null;
+    setUniqueWidth((w) => clampUniqueWidth(w)); // viewport may have changed
     setUniqueCol(col);
+  }
+
+  // Drag the panel's left edge to widen it — wide enough shows full names that
+  // ellipsis away at the default width.
+  function startUniqueResize(e) {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startW = uniqueWidth;
+    let w = startW;
+    const move = (ev) => {
+      w = clampUniqueWidth(startW + (startX - ev.clientX));
+      setUniqueWidth(w);
+    };
+    const up = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      document.body.classList.remove("x-resizing");
+      try {
+        localStorage.setItem(UNIQUE_W_KEY, String(w));
+      } catch {
+        /* private mode — width just won't persist */
+      }
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+    document.body.classList.add("x-resizing");
+  }
+
+  // Double-click the handle -> back to the default width.
+  function resetUniqueWidth() {
+    setUniqueWidth(clampUniqueWidth(UNIQUE_W_DEFAULT));
+    try {
+      localStorage.setItem(UNIQUE_W_KEY, String(UNIQUE_W_DEFAULT));
+    } catch {
+      /* ignore */
+    }
   }
 
   // Toggle one value of the current column in/out of the filter set. Columns are
   // AND'd; values within a column OR — and picking a value on a second column
   // adds to the filter instead of replacing the first, so filters stack.
   function pickUnique(value) {
+    lastPickRef.current[uniqueCol] = value; // where to resume on reopen
     setValueFilters((f) => {
       const cur = f[uniqueCol] || [];
       const next = cur.includes(value)
@@ -2176,7 +2271,23 @@ export default function ReviewStep({ file, onCommitted }) {
       {/* Unique-values side panel — click a value to filter the grid by it */}
       {uniqueCol && (
         <div className="unique-overlay" onClick={() => setUniqueCol(null)}>
-          <aside className="unique-panel" onClick={(e) => e.stopPropagation()}>
+          <aside
+            className="unique-panel"
+            style={{ width: uniqueWidth }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* Drag the left edge to widen the panel until long values fit;
+                double-click resets it. */}
+            <div
+              className="unique-resize"
+              onPointerDown={startUniqueResize}
+              onDoubleClick={resetUniqueWidth}
+              role="separator"
+              aria-orientation="vertical"
+              title="Drag to resize — double-click to reset"
+            >
+              <span className="unique-resize-grip" />
+            </div>
             <div className="unique-head">
               <div>
                 <h3>Unique values</h3>
@@ -2262,7 +2373,7 @@ export default function ReviewStep({ file, onCommitted }) {
                 </div>
               )}
             </div>
-            <div className="unique-list">
+            <div className="unique-list" ref={uniqueListRef}>
               {similarBase ? (
                 // "Find similar" mode: show only the close matches (checkboxes),
                 // most-similar first, each with its similarity %.
@@ -2279,6 +2390,7 @@ export default function ReviewStep({ file, onCommitted }) {
                     <label
                       className={`unique-row${mergePicked.has(u.value) ? " picked" : ""}`}
                       key={u.value}
+                      data-uval={u.value}
                       title="Merge this variant into the canonical value"
                     >
                       <input
@@ -2330,6 +2442,7 @@ export default function ReviewStep({ file, onCommitted }) {
                           mergePicked.has(u.value) ? " picked" : ""
                         }`}
                         key={u.value}
+                        data-uval={u.value}
                         title="Select this variant to merge into the canonical value"
                       >
                         <input
@@ -2351,6 +2464,7 @@ export default function ReviewStep({ file, onCommitted }) {
                       <div
                         className={`unique-row${checked ? " active" : ""}`}
                         key={u.value}
+                        data-uval={u.value}
                       >
                         <label
                           className="unique-pick"
@@ -2362,7 +2476,9 @@ export default function ReviewStep({ file, onCommitted }) {
                             checked={checked}
                             onChange={() => pickUnique(u.value)}
                           />
-                          <span className="unique-val">{u.value}</span>
+                          <span className="unique-val" title={u.value}>
+                            {u.value}
+                          </span>
                         </label>
                         <button
                           className="unique-similar-btn"
