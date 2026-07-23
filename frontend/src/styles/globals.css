@@ -3063,6 +3063,46 @@ input::placeholder {
   color: var(--muted-2);
   font-size: 0.7rem;
 }
+/* Blank-cell count next to the unique badge — a filter button in its own right. */
+.th-blank {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  margin-left: 0.35rem;
+  height: 18px;
+  padding: 0 6px;
+  border-radius: 999px;
+  border: 1px dashed var(--border-strong);
+  background: none;
+  color: var(--muted);
+  font: inherit;
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0;
+  cursor: pointer;
+}
+.th-blank:hover {
+  color: var(--text);
+  border-color: var(--brand);
+}
+.th-blank.active {
+  border-style: solid;
+  border-color: var(--brand);
+  background: color-mix(in srgb, var(--brand) 14%, var(--surface));
+  color: var(--brand);
+}
+/* The "empty cell" marker, same language as the grid legend. */
+.blank-dot {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  border-radius: 3px;
+  background: var(--surface-2);
+  border: 1px solid var(--border-strong);
+}
+.th-blank.active .blank-dot {
+  border-color: var(--brand);
+}
 .grid-table th.col-editing {
   background: color-mix(in srgb, var(--brand) 12%, var(--surface));
   color: var(--brand);
@@ -3573,6 +3613,17 @@ body.x-resizing {
 }
 .unique-row.picked {
   background: color-mix(in srgb, var(--brand) 12%, var(--surface));
+}
+/* Pinned "(blank)" row at the top of the values list. */
+.unique-row.blank-row {
+  border-bottom: 1px dashed var(--border);
+  border-radius: 8px 8px 0 0;
+  font-style: italic;
+}
+.unique-row.blank-row .unique-val {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
 }
 .unique-row .row-check {
   flex: none;

@@ -690,6 +690,14 @@ export default function ReviewStep({ file, onCommitted }) {
     setDraftBlank((b) => (b ? "" : "*"));
   }
 
+  // Show only the rows whose cell in this column is empty (click the same count
+  // again to drop the filter). Used by the header badge and the unique panel.
+  function toggleBlankColumn(col) {
+    setHeaderMenuCol(null);
+    setBlankFilter((b) => (b === col ? "" : col));
+    setPage(0);
+  }
+
   function removeTagFilter(tag) {
     setActiveTags((t) => t.filter((x) => x !== tag));
     setPage(0);
@@ -1720,6 +1728,20 @@ export default function ReviewStep({ file, onCommitted }) {
                       )}
                       <span className="th-caret">▾</span>
                     </button>
+                    {/* Blank-cell count for this column — click to see just those
+                        rows. Sits outside .th-label so it stays its own button. */}
+                    {blankByCol[c] > 0 && (
+                      <button
+                        className={`th-blank${blankFilter === c ? " active" : ""}`}
+                        onClick={() => toggleBlankColumn(c)}
+                        title={`${blankByCol[c]} row${
+                          blankByCol[c] === 1 ? "" : "s"
+                        } have ${c} empty — click to show only those rows`}
+                      >
+                        <span className="blank-dot" />
+                        {blankByCol[c]}
+                      </button>
+                    )}
                   </div>
                 </th>
               ))}
@@ -2464,6 +2486,34 @@ export default function ReviewStep({ file, onCommitted }) {
               )}
             </div>
             <div className="unique-list" ref={uniqueListRef}>
+              {/* Blank cells aren't a "value", so they never appear in the list —
+                  pin them at the top with their own count and filter. */}
+              {!mergeMode &&
+                !similarBase &&
+                !uniqueSearch.trim() &&
+                blankByCol[uniqueCol] > 0 && (
+                <div
+                  className={`unique-row blank-row${
+                    blankFilter === uniqueCol ? " active" : ""
+                  }`}
+                >
+                  <label
+                    className="unique-pick"
+                    title={`Show only the rows whose ${uniqueCol} is empty`}
+                  >
+                    <input
+                      type="checkbox"
+                      className="row-check"
+                      checked={blankFilter === uniqueCol}
+                      onChange={() => toggleBlankColumn(uniqueCol)}
+                    />
+                    <span className="unique-val">
+                      <span className="blank-dot" /> (blank)
+                    </span>
+                  </label>
+                  <span className="unique-count">{blankByCol[uniqueCol]}</span>
+                </div>
+              )}
               {similarBase ? (
                 // "Find similar" mode: show only the close matches (checkboxes),
                 // most-similar first, each with its similarity %.
