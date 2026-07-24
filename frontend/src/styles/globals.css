@@ -4051,3 +4051,86 @@ body.x-resizing {
   z-index: 2;
   background: var(--brand-50);
 }
+
+/* ---------- PRS standardization tab ---------- */
+/* The section tabs carry an icon, so lay the label out beside it. */
+.view-tabs button {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.prs-panels {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 1rem;
+  margin-top: 1rem;
+  align-items: start;
+}
+@media (max-width: 1000px) {
+  .prs-panels {
+    grid-template-columns: 1fr;
+  }
+}
+.prs-panels .table {
+  margin-top: 0.6rem;
+}
+.prs-panels .table th,
+.prs-panels .table td {
+  padding: 0.5rem 0.7rem;
+}
+
+.prs-ok,
+.prs-fail {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  margin-left: 0.5rem;
+  font-size: 0.78rem;
+  font-weight: 600;
+  padding: 0.15rem 0.5rem;
+  border-radius: 999px;
+}
+.prs-ok {
+  color: var(--green);
+  background: color-mix(in srgb, var(--green) 12%, transparent);
+}
+.prs-fail {
+  color: var(--red);
+  background: color-mix(in srgb, var(--red) 12%, transparent);
+}
+
+.prs-checks {
+  list-style: none;
+  margin: 0.7rem 0 0;
+  padding: 0;
+  display: grid;
+  gap: 0.4rem;
+}
+.prs-checks li {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+  font-size: 0.88rem;
+  line-height: 1.35;
+  padding-bottom: 0.4rem;
+  border-bottom: 1px dashed var(--border);
+}
+.prs-checks li:last-child {
+  border-bottom: none;
+  padding-bottom: 0;
+}
+.prs-checks li .icon {
+  flex: none;
+  margin-top: 0.15rem;
+}
+.prs-checks li.ok .icon {
+  color: var(--green);
+}
+.prs-checks li.bad .icon {
+  color: var(--red);
+}
+.prs-checks li em {
+  color: var(--muted);
+  font-style: normal;
+}

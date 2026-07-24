@@ -325,6 +325,43 @@ class StandardizePreview(BaseModel):
     filename: str
 
 
+# ---- PRS standardization ----
+class PrsCheck(BaseModel):
+    """One validation result from the PRS consolidation."""
+
+    check: str
+    ok: bool
+    detail: str = ""
+
+
+class PrsGroup(BaseModel):
+    """A role block and how many numbered columns the dataset needs for it."""
+
+    group: str  # "Composer", "Publisher", ...
+    roles: list[str]  # the source role codes routed into this block
+    columns: int  # numbered slots created (max occurrences in a single work)
+    parties: int  # total parties in this block
+
+
+class PrsPreview(BaseModel):
+    """Preview of a consolidated PRS report: layout, validation and a sample of
+    the one-row-per-work output. The full workbooks come from the download
+    endpoint."""
+
+    filename: str
+    work_key: str  # the identifier the rows were grouped by
+    total_works: int
+    total_parties: int
+    source_rows: int
+    duplicates_removed: int
+    work_columns: list[str]
+    columns: list[str]  # full-variant columns, in order
+    core_columns: list[str]  # core-variant columns, in order
+    rows: list[dict]  # sample rows of the full variant
+    groups: list[PrsGroup]
+    checks: list[PrsCheck]
+
+
 # ---- Cleaning / review ----
 class TagGroup(BaseModel):
     tag: str
