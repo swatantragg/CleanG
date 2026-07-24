@@ -647,6 +647,34 @@ export default function ReviewStep({ file, onCommitted }) {
     setDrafts({});
   }
 
+  function discardRowDraft(rowIndex) {
+    setDrafts((d) => {
+      const n = { ...d };
+      delete n[rowIndex];
+      return n;
+    });
+  }
+
+  // Enter applies the row you're typing in (same as its ✓ button), Escape throws
+  // that row's edits away — so an edit can be committed from the keyboard without
+  // reaching for the mouse. Shift+Enter is left alone for anyone used to it
+  // meaning "newline".
+  function cellKeyDown(event, row) {
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      event.currentTarget.blur();
+      if (drafts[row.row_index] && !pendingRows.has(row.row_index) && !busy) {
+        saveRow(row);
+      }
+      return;
+    }
+    if (event.key === "Escape") {
+      event.preventDefault();
+      event.currentTarget.blur();
+      discardRowDraft(row.row_index);
+    }
+  }
+
   // --- Filters ---------------------------------------------------------------
   function openFilters() {
     // Seed the modal with whatever's currently applied so it reflects reality.
@@ -1871,6 +1899,7 @@ export default function ReviewStep({ file, onCommitted }) {
                                 onChange={(e) =>
                                   setDraft(row.row_index, c, e.target.value)
                                 }
+                                onKeyDown={(e) => cellKeyDown(e, row)}
                               />
                             </td>
                           );
@@ -1891,6 +1920,7 @@ export default function ReviewStep({ file, onCommitted }) {
                                 <input
                                   value={val}
                                   onChange={(e) => setDraft(row.row_index, c, e.target.value)}
+                                  onKeyDown={(e) => cellKeyDown(e, row)}
                                 />
                               )}
                               <span className="cell-tag">
@@ -2260,6 +2290,9 @@ export default function ReviewStep({ file, onCommitted }) {
                 placeholder="e.g. Artium | Goongoonalo  or  50 | 50"
                 value={fillVal}
                 onChange={(e) => setFillVal(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && !fillBusy) applyFill();
+                }}
                 autoFocus
               />
               <p className="muted small" style={{ marginTop: "0.5rem" }}>
@@ -2649,6 +2682,15 @@ export default function ReviewStep({ file, onCommitted }) {
                   placeholder="correct value (e.g. Shreya Ghoshal)"
                   value={mergeTarget}
                   onChange={(e) => setMergeTarget(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (
+                      e.key === "Enter" &&
+                      !mergeBusy &&
+                      mergePicked.size > 0 &&
+                      mergeTarget.trim()
+                    )
+                      requestMerge();
+                  }}
                 />
                 <button
                   className="btn primary sm"
