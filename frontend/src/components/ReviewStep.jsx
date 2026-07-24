@@ -179,6 +179,7 @@ export default function ReviewStep({ file, onCommitted }) {
   // it instead of back at the top of a long list.
   const lastPickRef = useRef({});
   const scrollToRef = useRef(null); // value to scroll to once the list renders
+  const savingRef = useRef(new Set()); // row indexes with a save in flight
 
   // --- Tab-wide grid search (works in every view tab) ---
   const [search, setSearch] = useState(""); // what the user is typing
@@ -591,7 +592,11 @@ export default function ReviewStep({ file, onCommitted }) {
 
   async function saveRow(row) {
     const values = drafts[row.row_index];
-    if (!values) return;
+    // `pendingRows` is React state, so it hasn't updated yet when two triggers
+    // land in the same tick (a fast double Enter). The ref is the real in-flight
+    // set and keeps the second one from sending a duplicate PUT.
+    if (!values || savingRef.current.has(row.row_index)) return;
+    savingRef.current.add(row.row_index);
     markPending(row.row_index, true);
     setError("");
     try {
@@ -608,6 +613,7 @@ export default function ReviewStep({ file, onCommitted }) {
     } catch (err) {
       setError(err.message);
     } finally {
+      savingRef.current.delete(row.row_index);
       markPending(row.row_index, false);
     }
   }
@@ -645,6 +651,34 @@ export default function ReviewStep({ file, onCommitted }) {
 
   function discardDrafts() {
     setDrafts({});
+  }
+
+  function discardRowDraft(rowIndex) {
+    setDrafts((d) => {
+      const n = { ...d };
+      delete n[rowIndex];
+      return n;
+    });
+  }
+
+  // Enter applies the row you're typing in (same as its ✓ button), Escape throws
+  // that row's edits away — so an edit can be committed from the keyboard without
+  // reaching for the mouse. Shift+Enter is left alone for anyone used to it
+  // meaning "newline".
+  function cellKeyDown(event, row) {
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      event.currentTarget.blur();
+      if (drafts[row.row_index] && !pendingRows.has(row.row_index) && !busy) {
+        saveRow(row);
+      }
+      return;
+    }
+    if (event.key === "Escape") {
+      event.preventDefault();
+      event.currentTarget.blur();
+      discardRowDraft(row.row_index);
+    }
   }
 
   // --- Filters ---------------------------------------------------------------
@@ -935,7 +969,9 @@ export default function ReviewStep({ file, onCommitted }) {
   async function requestMerge() {
     const from = [...mergePicked];
     const to = mergeTarget.trim();
-    if (from.length === 0 || !to) return;
+    // Re-entry guard: a second trigger (a keystroke on top of a click) must not
+    // start a parallel run whose `finally` clears the busy flag under the first.
+    if (from.length === 0 || !to || mergeBusy) return;
     setMergeBusy(true);
     setError("");
     try {
@@ -954,7 +990,7 @@ export default function ReviewStep({ file, onCommitted }) {
   // Step 2: apply the confirmed merge — rewrites all matching cells, returns the
   // refreshed grid, then reloads the unique list.
   async function confirmMerge() {
-    if (!mergeConfirm) return;
+    if (!mergeConfirm || mergeBusy) return;
     const col = uniqueCol;
     setMergeBusy(true);
     setError("");
@@ -1871,6 +1907,7 @@ export default function ReviewStep({ file, onCommitted }) {
                                 onChange={(e) =>
                                   setDraft(row.row_index, c, e.target.value)
                                 }
+                                onKeyDown={(e) => cellKeyDown(e, row)}
                               />
                             </td>
                           );
@@ -1891,6 +1928,7 @@ export default function ReviewStep({ file, onCommitted }) {
                                 <input
                                   value={val}
                                   onChange={(e) => setDraft(row.row_index, c, e.target.value)}
+                                  onKeyDown={(e) => cellKeyDown(e, row)}
                                 />
                               )}
                               <span className="cell-tag">
@@ -2260,6 +2298,11 @@ export default function ReviewStep({ file, onCommitted }) {
                 placeholder="e.g. Artium | Goongoonalo  or  50 | 50"
                 value={fillVal}
                 onChange={(e) => setFillVal(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key !== "Enter" || fillBusy || !fillCol) return;
+                  e.preventDefault();
+                  applyFill();
+                }}
                 autoFocus
               />
               <p className="muted small" style={{ marginTop: "0.5rem" }}>
@@ -2649,6 +2692,15 @@ export default function ReviewStep({ file, onCommitted }) {
                   placeholder="correct value (e.g. Shreya Ghoshal)"
                   value={mergeTarget}
                   onChange={(e) => setMergeTarget(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key !== "Enter") return;
+                    e.preventDefault();
+                    // Once the confirm dialog is up it owns the Enter key —
+                    // otherwise this input (which keeps focus behind the dialog)
+                    // would re-run the preview instead of applying the merge.
+                    if (mergeConfirm || mergeBusy) return;
+                    if (mergePicked.size > 0 && mergeTarget.trim()) requestMerge();
+                  }}
                 />
                 <button
                   className="btn primary sm"
@@ -2679,7 +2731,19 @@ export default function ReviewStep({ file, onCommitted }) {
 
       {/* Merge confirmation — shows the blast radius before any cell changes */}
       {mergeConfirm && (
-        <div className="save-overlay" onClick={() => !mergeBusy && setMergeConfirm(null)}>
+        <div
+          className="save-overlay"
+          onClick={() => !mergeBusy && setMergeConfirm(null)}
+          // The dialog owns the keyboard while it's open. Its Merge button is
+          // focused on open, so Enter activates that button natively (handling it
+          // here as well would fire the merge twice); Escape backs out.
+          onKeyDown={(e) => {
+            if (e.key === "Escape" && !mergeBusy) {
+              e.preventDefault();
+              setMergeConfirm(null);
+            }
+          }}
+        >
           <div className="confirm-modal" onClick={(e) => e.stopPropagation()}>
             <div className="confirm-spark">
               <Icon name="check" size={22} />
@@ -2713,6 +2777,7 @@ export default function ReviewStep({ file, onCommitted }) {
                 className="btn primary sm"
                 onClick={confirmMerge}
                 disabled={mergeBusy || mergeConfirm.count === 0}
+                autoFocus
               >
                 <Icon name="check" size={15} />
                 {mergeBusy ? "Merging…" : `Merge ${mergeConfirm.count} row${mergeConfirm.count === 1 ? "" : "s"}`}

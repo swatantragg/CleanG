@@ -2,8 +2,12 @@
 Singer 1, …) and get back the MLC Bulk Work workbook, one row per writer.
 
   - POST /api/mlc/preview   -> mapping, validation results and a sample of rows
-  - POST /api/mlc/download  -> the MLC Bulk Work .xlsx
+  - POST /api/mlc/download  -> the MLC Bulk Work .xlsx, or a .zip of one complete
+                               workbook per 300-row part when it doesn't fit in one
 """
+
+import io
+import zipfile
 
 from fastapi import (
     APIRouter,
@@ -30,7 +34,7 @@ from ..core.mlc import (
     MlcError,
     convert,
     source_mapping,
-    to_workbook,
+    to_workbooks,
     unmapped_columns,
 )
 from ..database import get_db
@@ -42,6 +46,7 @@ settings = get_settings()
 router = APIRouter(prefix="/api/mlc", tags=["mlc"])
 
 _XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+_ZIP_MIME = "application/zip"
 _SUFFIX = "_MLC_bulk_work"
 
 
@@ -101,26 +106,38 @@ async def download(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    """Stream the MLC Bulk Work workbook built from the upload."""
+    """Stream the MLC Bulk Work workbook built from the upload — or, when the
+    output runs past the 300-row file limit, a .zip holding one complete workbook
+    per part (a song is never split between two of them)."""
     name, data = await _read(file)
-    stem = (name.rsplit(".", 1)[0] or "works")[:80]
+    stem = (name.rsplit(".", 1)[0] or "works")[:80] + _SUFFIX
     try:
         result = convert(name, data)
-        payload = to_workbook(result["built"])
+        books = to_workbooks(result["built"], stem)
     except MlcError as exc:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, exc.message)
 
     log_file_activity(db, user, name, "Reverse PRS")
+
+    if len(books) == 1:
+        filename, payload = books[0]
+        media_type, fallback = _XLSX_MIME, "mlc_bulk_work.xlsx"
+    else:
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            for book_name, book in books:
+                zf.writestr(book_name, book)
+        filename, payload = f"{stem}.zip", buf.getvalue()
+        media_type, fallback = _ZIP_MIME, "mlc_bulk_work.zip"
+
     # A plain Response with an explicit Content-Length (same reasoning as the PRS
     # router: chunked streaming can be reset by the security middleware and gives
     # the client no total to draw a progress bar from).
     return Response(
         content=payload,
-        media_type=_XLSX_MIME,
+        media_type=media_type,
         headers={
-            "Content-Disposition": content_disposition(
-                f"{stem}{_SUFFIX}.xlsx", "mlc_bulk_work.xlsx"
-            ),
+            "Content-Disposition": content_disposition(filename, fallback),
             "Content-Length": str(len(payload)),
             "Access-Control-Expose-Headers": "Content-Disposition",
         },

@@ -21,7 +21,8 @@ Mapping (from the MLC mapping sheet):
   Song Alternate Name    -> AKA TITLE (type code AT)
   Composer / Lyricist    -> WRITER LAST/FIRST NAME, role code C / A
                             (the same person in both roles -> one row, code CA)
-  CAE                    -> WRITER IPI NUMBER
+  CAE                    -> WRITER IPI NUMBER (a CAE glued to the name —
+                            "Traditional - 39657154" — is moved here too)
   Singer 1..n            -> RECORDING ARTIST NAME (merged)
   ISRC                   -> RECORDING ISRC
   Music Label            -> RECORDING LABEL
@@ -37,11 +38,9 @@ name, the rest is the last name, and a single-word name fills both.
 import io
 import os
 import re
-from copy import copy
 
 from openpyxl import load_workbook
 from openpyxl.styles import Alignment, Font
-from openpyxl.utils import get_column_letter
 
 from .standardize import StandardizeError, load_table
 
@@ -98,13 +97,14 @@ LABEL_RE = re.compile(r"^(MUSICLABEL|LABEL|LABELNAME|RECORDLABEL)$")
 PREVIEW_ROWS = 25
 
 # A sheet is at most 300 rows in total — the header plus 299 writer rows, the
-# size of the MLC template itself. Past that the workbook continues on "Part 2",
-# "Part 3", … each carrying its own copy of the header row. A song is never split
-# across two sheets: if its writer rows don't all fit, the whole song moves to
-# the next part, so a part usually stops a row or two short of the limit.
+# size of the MLC template itself. Past that the output continues in a *separate
+# workbook*: each part is a complete MLC file of its own (header, definition
+# sheets and all), and the parts are handed over together in a .zip. A song is
+# never split across two files: if its writer rows don't all fit, the whole song
+# moves to the next part, so a part usually stops a row or two short of the limit.
 MAX_SHEET_ROWS = 300
 MAX_ROWS_PER_SHEET = MAX_SHEET_ROWS - 1      # writer rows, header excluded
-PART_SHEET = "Part {}"
+PART_NAME = "{stem}_part{n}.xlsx"            # file name of one part
 
 
 class MlcError(Exception):
@@ -117,6 +117,24 @@ class MlcError(Exception):
 
 def _norm(header: str) -> str:
     return re.sub(r"[^A-Z0-9]", "", str(header or "").upper())
+
+
+# A writer cell that carries its own CAE glued on the end — "Traditional -
+# 39657154". The number is an identifier, not part of the name, so it comes off.
+# Five digits minimum, so a genuine "Lankakand - 2" style suffix is never touched.
+NAME_WITH_ID = re.compile(r"^(?P<name>.*?)\s*[-–—]\s*(?P<id>\d{5,})$")
+
+
+def strip_name_id(name: str) -> tuple[str, str]:
+    """"Traditional - 39657154" -> ("Traditional", "39657154").
+
+    Returns the name and the identifier that was attached to it (empty when
+    there was none). Nothing else about the name is altered.
+    """
+    match = NAME_WITH_ID.match(str(name or "").strip())
+    if not match or not match.group("name").strip():
+        return str(name or "").strip(), ""
+    return match.group("name").strip(), match.group("id")
 
 
 def person_key(name: str) -> str:
@@ -234,6 +252,7 @@ def build(info: dict) -> dict:
     writer_counts = {ROLE_COMPOSER: 0, ROLE_AUTHOR: 0, ROLE_COMBINED: 0}
     without_writers: list[str] = []
     ipi_conflicts: list[str] = []
+    stripped_names = 0
 
     for row in rows:
         if not any(str(v or "").strip() for v in row):
@@ -266,7 +285,12 @@ def build(info: dict) -> dict:
             name = cell(row, writer["name"])
             if not name:            # an empty writer column never becomes a row
                 continue
-            ipi = cell(row, writer["cae"])
+            # "Traditional - 39657154" is a name with its CAE stuck to it: keep
+            # the name, and use the number as the IPI if the CAE column is empty.
+            name, attached = strip_name_id(name)
+            if attached:
+                stripped_names += 1
+            ipi = cell(row, writer["cae"]) or attached
             key = person_key(name)
             same = next((e for e in entries if e["key"] == key and e["role"] != writer["role"]), None)
             if same is not None:
@@ -310,6 +334,7 @@ def build(info: dict) -> dict:
         "writer_counts": writer_counts,
         "without_writers": without_writers,
         "ipi_conflicts": ipi_conflicts,
+        "stripped_names": stripped_names,
     }
 
 
@@ -425,6 +450,10 @@ def validate(info: dict, built: dict) -> list[dict]:
     add("Names split into first / last", True,
         "first word is the first name, the rest the last name; a single-word "
         "name fills both fields")
+    add("CAE stripped from writer names", True,
+        f"{built['stripped_names']} name(s) like “Traditional - 39657154” kept "
+        "just the name, the number going to Writer IPI Number when that was empty"
+        if built["stripped_names"] else "no writer name carries a trailing CAE")
     add("Singers kept as the recording artist", bool(info["singers"]),
         "merged into RECORDING ARTIST NAME — never turned into writer rows"
         if info["singers"] else "no singer column found in the file")
@@ -432,12 +461,13 @@ def validate(info: dict, built: dict) -> list[dict]:
         "MLC Song Code, Members Song ID, ISWC and the administrator block")
     parts = built["parts"]
     sizes = ", ".join(f"{len(p)}" for p in parts[:6]) + ("…" if len(parts) > 6 else "")
-    add(f"Sheets capped at {MAX_SHEET_ROWS} rows", all(len(p) <= MAX_ROWS_PER_SHEET for p in parts),
-        f"1 sheet of {sizes} writer rows (+ the header)" if len(parts) == 1
-        else f"{len(parts)} sheets of {sizes} writer rows — the header is repeated on each")
-    add("No song split across sheets", True,
-        "a song whose writers don't all fit moves to the next part in full"
-        if len(parts) > 1 else "everything fits on one sheet")
+    add(f"Files capped at {MAX_SHEET_ROWS} rows", all(len(p) <= MAX_ROWS_PER_SHEET for p in parts),
+        f"1 file of {sizes} writer rows (+ the header)" if len(parts) == 1
+        else f"{len(parts)} separate MLC workbooks of {sizes} writer rows, "
+             "downloaded together as a .zip")
+    add("No song split across files", True,
+        "a song whose writers don't all fit moves to the next file in full"
+        if len(parts) > 1 else "everything fits in one file")
     add("Every work generated at least one writer row", not built["without_writers"],
         "all works have a writer" if not built["without_writers"]
         else f"{len(built['without_writers'])} row(s) have no composer or lyricist and "
@@ -466,49 +496,47 @@ def _typed(value: str):
     return s
 
 
-def _add_part_sheet(wb, template_ws, title: str, index: int):
-    """A continuation sheet carrying its own copy of the MLC header row — same
-    labels, colour coding, widths and height as the template's."""
-    ws = wb.create_sheet(title, index)
-    for c in range(1, N_COLUMNS + 1):
-        source = template_ws.cell(1, c)
-        header = ws.cell(1, c, source.value)
-        header._style = copy(source._style)
-        letter = get_column_letter(c)
-        ws.column_dimensions[letter].width = template_ws.column_dimensions[letter].width
-    ws.row_dimensions[1].height = template_ws.row_dimensions[1].height
-    return ws
-
-
-def to_workbook(built: dict) -> bytes:
-    """Write the rows into the bundled MLC template, so the download carries the
-    template's own header row, column widths, colour coding and the three MLC
-    definition sheets — i.e. the file MLC expects, with our data in it.
-
-    A sheet holds at most MAX_ROWS_PER_SHEET writer rows; anything beyond that
-    continues on "Part 2", "Part 3", … with the header repeated. Songs are never
-    split, so a part can end just short of the limit.
+def to_workbook(built: dict, rows: list[dict] | None = None) -> bytes:
+    """One complete MLC Bulk Work file: the bundled template — its header row,
+    column widths, colour coding and the three MLC definition sheets — with the
+    given rows written into it. `rows` defaults to everything, and is one part
+    when the output is split across files.
     """
     wb = load_workbook(TEMPLATE)
-    first = wb[SHEET]
+    ws = wb[SHEET]
     columns = built["columns"]
+    if rows is None:
+        rows = built["rows"]
 
     font = Font(name="Calibri", size=12)
     align = Alignment(horizontal="left")
-    for part, rows in enumerate(built["parts"]):
-        ws = first if part == 0 else _add_part_sheet(
-            wb, first, PART_SHEET.format(part + 1), wb.index(wb[SHEET]) + part
-        )
-        for i, row in enumerate(rows, start=2):
-            for c in range(1, N_COLUMNS + 1):
-                value = row.get(columns[c - 1], "")
-                cell = ws.cell(i, c, _typed(value) if value != "" else None)
-                cell.font = font
-                cell.alignment = align
+    for i, row in enumerate(rows, start=2):
+        for c in range(1, N_COLUMNS + 1):
+            value = row.get(columns[c - 1], "")
+            cell = ws.cell(i, c, _typed(value) if value != "" else None)
+            cell.font = font
+            cell.alignment = align
 
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()
+
+
+def to_workbooks(built: dict, stem: str) -> list[tuple[str, bytes]]:
+    """The output as (filename, bytes) — one entry per part.
+
+    Up to MAX_ROWS_PER_SHEET rows it's a single file named after the upload;
+    beyond that each part is its own standalone MLC workbook (`…_part1.xlsx`,
+    `…_part2.xlsx`, …) and the caller ships them together in a .zip. No song is
+    ever split between two files.
+    """
+    parts = built["parts"]
+    if len(parts) == 1:
+        return [(f"{stem}.xlsx", to_workbook(built, parts[0]))]
+    return [
+        (PART_NAME.format(stem=stem, n=n), to_workbook(built, rows))
+        for n, rows in enumerate(parts, start=1)
+    ]
 
 
 def convert(filename: str, data: bytes) -> dict:

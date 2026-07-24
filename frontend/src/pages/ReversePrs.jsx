@@ -12,6 +12,10 @@ const DL_LABEL = {
   done: "Saved.",
 };
 
+// A file holds at most 300 rows (header included); past that the output is split
+// into one complete MLC workbook per part, zipped together.
+const MAX_SHEET_ROWS = 300;
+
 /**
  * Reverse PRS: a one-row-per-work sheet (Composer 1, Lyricist 1, Singer 1 …)
  * expanded into the MLC Bulk Work template — one row per writer.
@@ -67,7 +71,7 @@ export default function ReversePrs() {
         file,
         (stage, pct) => setDl({ stage, pct }),
         {},
-        "mlc_bulk_work.xlsx"
+        split ? "mlc_bulk_work.zip" : "mlc_bulk_work.xlsx"
       );
       saveBlob(blob, name);
       setDl({ stage: "done", pct: 1 });
@@ -88,6 +92,8 @@ export default function ReversePrs() {
 
   const dlPct = dl ? Math.round((dl.pct || 0) * 100) : 0;
   const dlIndeterminate = dl?.stage === "processing";
+  const parts = preview?.part_rows.length || 1;
+  const split = parts > 1; // several workbooks -> the download is a .zip
   const failed = preview?.checks.filter((c) => !c.ok) || [];
   const filled = preview?.mapping.filter((m) => m.source) || [];
   const blank = preview?.mapping.filter((m) => !m.source) || [];
@@ -103,9 +109,11 @@ export default function ReversePrs() {
         and every further writer grouped underneath. Composers get role code C and
         lyricists A — someone credited as <strong>both on the same work is one row
         with role code CA</strong>, not two. Each CAE becomes the Writer IPI
-        Number, names are split into first / last, and singers stay with the
-        recording as the artist — they never become writer rows. Columns the MLC
-        template has no field for are left out, never invented.
+        Number — and a name carrying its own CAE (“Traditional - 39657154”) keeps
+        just the name, the number moving to the IPI field. Names are split into
+        first / last, and singers stay with the recording as the artist — they
+        never become writer rows. Columns the MLC template has no field for are
+        left out, never invented.
       </p>
 
       {error && (
@@ -215,14 +223,14 @@ export default function ReversePrs() {
             <div className="muted small">
               Showing the first {preview.rows.length} of{" "}
               {preview.total_writers.toLocaleString()} writer rows.
-              {preview.part_rows.length > 1 && (
+              {split && (
                 <>
                   {" "}
-                  The workbook is split across{" "}
-                  <strong>{preview.part_rows.length} sheets</strong> of at most 300
-                  rows ({preview.part_rows.join(" + ")}) — “Format”, then “Part 2”
-                  onwards, each with its own header row. No song is split between
-                  sheets.
+                  Past {MAX_SHEET_ROWS} rows a file the output becomes{" "}
+                  <strong>{parts} separate MLC workbooks</strong> (
+                  {preview.part_rows.join(" + ")} rows), each a complete template
+                  of its own, downloaded together as a <strong>.zip</strong>. No
+                  song is split between files.
                 </>
               )}
             </div>
@@ -232,7 +240,11 @@ export default function ReversePrs() {
               </button>
               <button className="btn primary" onClick={download} disabled={busy}>
                 <Icon name="download" size={16} />
-                {phase === "downloading" ? "Working…" : "Download MLC Bulk Work .xlsx"}
+                {phase === "downloading"
+                  ? "Working…"
+                  : split
+                  ? `Download ${parts} MLC files (.zip)`
+                  : "Download MLC Bulk Work .xlsx"}
               </button>
             </div>
           </div>
@@ -341,9 +353,10 @@ export default function ReversePrs() {
           </div>
 
           <p className="muted small" style={{ marginTop: "0.8rem" }}>
-            The download is the MLC Bulk Work template itself — same column order,
-            header wording, colour coding and the three MLC definition sheets —
-            with your data written into it, ready to submit.
+            {split ? "Each file in the zip is" : "The download is"} the MLC Bulk
+            Work template itself — same column order, header wording, colour coding
+            and the three MLC definition sheets — with your data written into it,
+            ready to submit.
           </p>
         </>
       )}
