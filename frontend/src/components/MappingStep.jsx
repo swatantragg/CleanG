@@ -429,6 +429,12 @@ export default function MappingStep({ file, onSaved, onNext }) {
                 setPendingCol((p) => ({ ...p, name: e.target.value }))
               }
               placeholder="Master column name"
+              onKeyDown={(e) => {
+                // Enter confirms the dialog, Escape closes it.
+                if (e.key === "Enter" && !adding && pendingCol.name.trim())
+                  addToMaster(pendingCol.header, pendingCol.name);
+                if (e.key === "Escape" && !adding) setPendingCol(null);
+              }}
               autoFocus
             />
             <div className="confirm-actions">
