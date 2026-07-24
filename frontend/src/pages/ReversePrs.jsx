@@ -7,26 +7,16 @@ const ACCEPT = [".csv", ".xlsx", ".xlsm"];
 
 const DL_LABEL = {
   uploading: "Uploading file…",
-  processing: "Consolidating on the server…",
+  processing: "Building the MLC workbook…",
   downloading: "Downloading…",
   done: "Saved.",
 };
 
-// The two output shapes the backend can build from one upload.
-const VARIANTS = [
-  {
-    id: "full",
-    label: "Full report",
-    hint: "Every mapped party field — Name, Role, IPI, ICE Agreement Number, Performance + Mechanical Society and Share, Claim Status, UA Flag, CAR.",
-  },
-  {
-    id: "core",
-    label: "Core report",
-    hint: "Only Name, Role, IPI Number, Performance Society and Performance Share per party.",
-  },
-];
-
-export default function PrsStandardize() {
+/**
+ * Reverse PRS: a one-row-per-work sheet (Composer 1, Lyricist 1, Singer 1 …)
+ * expanded into the MLC Bulk Work template — one row per writer.
+ */
+export default function ReversePrs() {
   const inputRef = useRef(null);
   const [file, setFile] = useState(null);
   const [preview, setPreview] = useState(null);
@@ -57,7 +47,7 @@ export default function PrsStandardize() {
     setPreview(null);
     setPhase("loading");
     try {
-      setPreview(await postJSON("/api/prs/preview", f));
+      setPreview(await postJSON("/api/mlc/preview", f));
     } catch (e) {
       setError(e.message);
       setFile(null);
@@ -66,18 +56,18 @@ export default function PrsStandardize() {
     }
   }
 
-  async function download(variant) {
+  async function download() {
     if (!file || busy) return;
     setError("");
     setPhase("downloading");
     setDl({ stage: "uploading", pct: 0 });
     try {
       const { blob, name } = await postDownload(
-        "/api/prs/download",
+        "/api/mlc/download",
         file,
         (stage, pct) => setDl({ stage, pct }),
-        { variant },
-        variant === "both" ? "prs_consolidated.zip" : "prs_consolidated.xlsx"
+        {},
+        "mlc_bulk_work.xlsx"
       );
       saveBlob(blob, name);
       setDl({ stage: "done", pct: 1 });
@@ -99,28 +89,23 @@ export default function PrsStandardize() {
   const dlPct = dl ? Math.round((dl.pct || 0) * 100) : 0;
   const dlIndeterminate = dl?.stage === "processing";
   const failed = preview?.checks.filter((c) => !c.ok) || [];
-  const workCount = preview?.work_columns.length || 0;
+  const filled = preview?.mapping.filter((m) => m.source) || [];
+  const blank = preview?.mapping.filter((m) => !m.source) || [];
 
   return (
     <>
       <p className="muted" style={{ marginTop: 0 }}>
-        Upload a raw PRS <em>List of works</em> export — one row per interested party,
-        so each Tune Code repeats. It comes back as <strong>one row per work</strong>:
-        work-level fields written once, and every composer, author and publisher
-        expanded sideways into numbered role columns. Column counts are read from
-        your file, so a work with six composers gets Composer 1–6. Roles that
-        contain a “C” (CA, AC, CP…) go under Composer only, keeping their own role
-        value. Names are flipped to “First Last”, society codes lose the numeric
-        prefix, dates become DD-MM-YYYY — everything else is passed through as given.
-      </p>
-      <p className="muted" style={{ marginTop: 0 }}>
-        Ownership is allocated for you: each work is 100% — <strong>25% composer,
-        25% author, 50% publisher</strong> — with every pool divided equally
-        between the parties that hold it (two composers → 12.5% each, four →
-        6.25%), and a combined CA role drawing from both writer pools. The result
-        lands in <strong>Performance Share</strong>. When a role is missing
-        entirely, the rest is left as calculated rather than redistributed, and
-        the work is named in the trailing <strong>Issue</strong> column.
+        The reverse of PRS consolidation. Upload a sheet with{" "}
+        <strong>one row per work</strong> and its parties spread sideways
+        (Composer 1, Composer 2, Lyricist 1, Singer 1…) and it comes back in the{" "}
+        <strong>MLC Bulk Work</strong> format: <strong>one row per writer</strong>,
+        with the work, publisher and recording information on the first writer row
+        and every further writer grouped underneath. Composers get role code C and
+        lyricists A — someone credited as <strong>both on the same work is one row
+        with role code CA</strong>, not two. Each CAE becomes the Writer IPI
+        Number, names are split into first / last, and singers stay with the
+        recording as the artist — they never become writer rows. Columns the MLC
+        template has no field for are left out, never invented.
       </p>
 
       {error && (
@@ -163,21 +148,21 @@ export default function PrsStandardize() {
           />
           {busy ? (
             <div className="dz-progress">
-              <p className="dz-title">Consolidating…</p>
+              <p className="dz-title">Expanding writers…</p>
               <div className="progress indeterminate">
                 <span />
               </div>
-              <p className="muted small">Grouping works and expanding interested parties</p>
+              <p className="muted small">One row per composer and lyricist</p>
             </div>
           ) : (
             <>
               <div className="dz-icon">
-                <Icon name="table" size={26} />
+                <Icon name="arrowRight" size={26} />
               </div>
-              <p className="dz-title">Drop a PRS report here, or click to browse</p>
+              <p className="dz-title">Drop a work sheet here, or click to browse</p>
               <p className="muted small">
-                .csv / .xlsx / .xlsm · up to 20&nbsp;MB · needs ALLIANCE_TUNECODE (or
-                WORKKEY) and ROLE_CLASS
+                .csv / .xlsx / .xlsm · up to 20&nbsp;MB · needs Song Name and at
+                least one Composer / Lyricist column
               </p>
             </>
           )}
@@ -196,21 +181,24 @@ export default function PrsStandardize() {
           >
             <div className="stat-card green">
               <div className="stat-num">{preview.total_works.toLocaleString()}</div>
-              <div className="stat-lbl">Works (one row each)</div>
+              <div className="stat-lbl">Works read</div>
             </div>
             <div className="stat-card blue">
-              <div className="stat-num">{preview.total_parties.toLocaleString()}</div>
-              <div className="stat-lbl">Interested parties placed</div>
+              <div className="stat-num">{preview.total_writers.toLocaleString()}</div>
+              <div className="stat-lbl">Writer rows generated</div>
             </div>
             <div className="stat-card amber">
               <div className="stat-num">
-                {workCount}
+                {preview.composers.toLocaleString()}
                 <span className="muted" style={{ fontSize: "1rem" }}>
                   {" "}
-                  + {preview.columns.length - workCount}
+                  + {preview.lyricists.toLocaleString()}
+                  {preview.combined > 0 && ` + ${preview.combined.toLocaleString()}`}
                 </span>
               </div>
-              <div className="stat-lbl">Work columns + party columns</div>
+              <div className="stat-lbl">
+                Composers + lyricists{preview.combined > 0 && " + both (CA)"}
+              </div>
             </div>
             <div className="stat-card">
               <div className="stat-num" style={{ fontSize: "1.1rem", lineHeight: 1.4 }}>
@@ -223,44 +211,28 @@ export default function PrsStandardize() {
             </div>
           </div>
 
-          <div className="resolved-bar" style={{ marginBottom: "1rem" }}>
-            <div className="muted small">
-              {preview.works_with_issues > 0 ? (
-                <>
-                  <Icon name="alert" size={14} />{" "}
-                  <strong>{preview.works_with_issues.toLocaleString()}</strong> of{" "}
-                  {preview.total_works.toLocaleString()} works can’t allocate the
-                  full 100% — each says which role is missing in the{" "}
-                  <strong>Issue</strong> column. The shares that could be
-                  calculated are kept as they are.
-                </>
-              ) : (
-                <>
-                  <Icon name="check" size={14} /> Every work allocates the full
-                  100% — the Issue column is empty throughout.
-                </>
-              )}
-            </div>
-          </div>
-
           <div className="resolved-bar">
             <div className="muted small">
-              Grouped by <strong>{preview.work_key}</strong>. Showing the first{" "}
-              {preview.rows.length} of {preview.total_works.toLocaleString()} works.
+              Showing the first {preview.rows.length} of{" "}
+              {preview.total_writers.toLocaleString()} writer rows.
+              {preview.part_rows.length > 1 && (
+                <>
+                  {" "}
+                  The workbook is split across{" "}
+                  <strong>{preview.part_rows.length} sheets</strong> of at most 300
+                  rows ({preview.part_rows.join(" + ")}) — “Format”, then “Part 2”
+                  onwards, each with its own header row. No song is split between
+                  sheets.
+                </>
+              )}
             </div>
             <div style={{ display: "flex", gap: "0.6rem", flexWrap: "wrap" }}>
               <button className="btn sm" onClick={reset} disabled={busy}>
                 <Icon name="x" size={15} /> New file
               </button>
-              <button className="btn" onClick={() => download("core")} disabled={busy}>
-                <Icon name="download" size={16} /> Core .xlsx
-              </button>
-              <button className="btn primary" onClick={() => download("full")} disabled={busy}>
+              <button className="btn primary" onClick={download} disabled={busy}>
                 <Icon name="download" size={16} />
-                {phase === "downloading" ? "Working…" : "Full .xlsx"}
-              </button>
-              <button className="btn" onClick={() => download("both")} disabled={busy}>
-                <Icon name="download" size={16} /> Both (.zip)
+                {phase === "downloading" ? "Working…" : "Download MLC Bulk Work .xlsx"}
               </button>
             </div>
           </div>
@@ -288,50 +260,35 @@ export default function PrsStandardize() {
           )}
 
           <div className="prs-panels">
-            {/* Role blocks created from this dataset */}
+            {/* How every MLC column was filled */}
             <div className="card">
-              <h3 className="sec-title">Role columns created</h3>
-              <table className="table" style={{ marginTop: "0.6rem" }}>
-                <thead>
-                  <tr>
-                    <th>Block</th>
-                    <th>Source roles</th>
-                    <th>Columns</th>
-                    <th>Parties</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {preview.groups.map((g) => (
-                    <tr key={g.group}>
-                      <td>
-                        <strong>{g.group}</strong>
-                      </td>
-                      <td>
-                        <span className="col-tags">
-                          {g.roles.map((r) => (
-                            <span key={r} className="col-tag">
-                              {r}
-                            </span>
-                          ))}
-                        </span>
-                      </td>
-                      <td>
-                        {g.group} 1–{g.columns}
-                      </td>
-                      <td>{g.parties.toLocaleString()}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-              <p className="muted small" style={{ marginTop: "0.7rem" }}>
-                Core report keeps 5 fields per party, full report{" "}
-                {(preview.columns.length - workCount) /
-                  preview.groups.reduce((n, g) => n + g.columns, 0)}
-                . Unused slots stay blank.
-              </p>
+              <h3 className="sec-title">MLC column mapping</h3>
+              <div className="std-map">
+                {filled.map((m) => (
+                  <div key={m.column} className="std-map-row">
+                    <span className="std-master">{m.column.trim()}</span>
+                    <Icon name="arrowLeft" size={14} className="std-arrow" />
+                    <span className="col-tags">
+                      <span className="col-tag">{m.source}</span>
+                    </span>
+                  </div>
+                ))}
+              </div>
+              {blank.length > 0 && (
+                <p className="muted small" style={{ marginTop: "0.8rem" }}>
+                  <strong>Left blank</strong> (nothing in the source maps here):{" "}
+                  {blank.map((m) => m.column.trim()).join(", ")}.
+                </p>
+              )}
+              {preview.unmapped_columns.length > 0 && (
+                <p className="muted small" style={{ marginTop: "0.5rem" }}>
+                  <strong>Not carried over</strong> (the MLC template has no field
+                  for them): {[...new Set(preview.unmapped_columns)].join(", ")}.
+                </p>
+              )}
             </div>
 
-            {/* Integrity report — the same checks are written into the workbook */}
+            {/* Integrity report */}
             <div className="card">
               <h3 className="sec-title">
                 Integrity checks{" "}
@@ -359,13 +316,13 @@ export default function PrsStandardize() {
             </div>
           </div>
 
-          {/* Sample of the consolidated output */}
+          {/* Sample of the MLC output */}
           <div className="preview-scroll" style={{ marginTop: "1rem", maxHeight: "60vh" }}>
             <table className="preview-table">
               <thead>
                 <tr>
                   {preview.columns.map((c) => (
-                    <th key={c}>{c}</th>
+                    <th key={c}>{c.trim()}</th>
                   ))}
                 </tr>
               </thead>
@@ -384,13 +341,9 @@ export default function PrsStandardize() {
           </div>
 
           <p className="muted small" style={{ marginTop: "0.8rem" }}>
-            {VARIANTS.map((v) => (
-              <span key={v.id} style={{ display: "block" }}>
-                <strong>{v.label}:</strong> {v.hint}
-              </span>
-            ))}
-            Both files carry identical work-level columns, and each workbook ships a
-            Validation sheet with the checks above.
+            The download is the MLC Bulk Work template itself — same column order,
+            header wording, colour coding and the three MLC definition sheets —
+            with your data written into it, ready to submit.
           </p>
         </>
       )}

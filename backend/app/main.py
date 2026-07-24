@@ -17,7 +17,18 @@ from .core.limiter import limiter
 from .core.scheduler import shutdown_scheduler, start_scheduler
 from .database import Base, SessionLocal, engine
 from .models import MasterColumn, User, UserRole
-from .routers import auth, branches, clean, files, master, prs, reports, standardize, users
+from .routers import (
+    auth,
+    branches,
+    clean,
+    files,
+    master,
+    mlc,
+    prs,
+    reports,
+    standardize,
+    users,
+)
 from .security import hash_password
 
 settings = get_settings()
@@ -336,6 +347,7 @@ app.include_router(files.router)
 app.include_router(clean.router)
 app.include_router(standardize.router)
 app.include_router(prs.router)
+app.include_router(mlc.router)
 app.include_router(reports.router)
 
 

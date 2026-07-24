@@ -5,6 +5,7 @@ from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session, defer
 
 from ..config import get_settings
+from ..core.activity import log_file_activity
 from ..core.dynamic_columns import attach_custom_column, make_attr, quote_ident
 from ..core.excel import MAX_BYTES, ExcelValidationError, read_and_validate
 from ..core.limiter import limiter
@@ -162,6 +163,7 @@ async def upload_file(
     db.add(uploaded)
     db.commit()
     db.refresh(uploaded)
+    log_file_activity(db, user, name, "Branch upload")
     return uploaded
 
 

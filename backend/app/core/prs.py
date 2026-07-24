@@ -18,6 +18,13 @@ Role routing: a role code containing "C" (C, CA, AC, CP, CAP, …) is a composer
 and lands in the Composer block only — never duplicated under Author — while the
 original role value is preserved in that party's Role column.
 
+Ownership is allocated dynamically: a work is always 100%, split 25% composer /
+25% author / 50% publisher, and each pool is divided equally between the parties
+holding that role. A combined role (CA) draws from both writer pools. The result
+is written to Performance Share, and a work that cannot allocate a pool (no
+publisher, say) keeps the shares it can and names the gap in a trailing Issue
+column instead of having the missing percentage redistributed.
+
 Two output shapes:
   FULL — every mapped party field (Name, Role, IPI, ICE Agreement Number,
          Performance/Mechanical Society + Share, Claim Status, UA Flag, CAR).
@@ -67,6 +74,16 @@ CORE_FIELDS = ["NAME", "ROLE_CLASS", "IPI_NO", "PERF_SOCIETY", "PERF"]
 VARIANTS = {"full": FULL_FIELDS, "core": CORE_FIELDS}
 
 ROLE_COLUMN = "ROLE_CLASS"
+
+# Ownership: a work is always 100%, divided into these role pools. Each pool is
+# split equally between the parties that hold it in that work, so the numbers
+# come from the data (1 composer -> 25, 2 -> 12.5, 4 -> 6.25) and nothing is
+# hardcoded to a party count.
+SHARE_POOLS = {"C": 25.0, "A": 25.0, "E": 50.0}
+POOL_ORDER = ["C", "A", "E"]
+POOL_LABEL = {"C": "Composer", "A": "Author", "E": "Publisher"}
+SHARE_COLUMN = "PERF"          # the allocated share is written here
+ISSUE_COLUMN = "Issue"         # trailing validation column (blank when 100% allocated)
 
 # Role-group labels and the order their blocks appear in.
 GROUP_LABEL = {
@@ -204,6 +221,66 @@ def role_group(role: str) -> str:
     return "C" if "C" in code else code
 
 
+def share_pools(role: str) -> set[str]:
+    """The ownership pools a role code draws from.
+
+    A combined writer code (CA, AC, CAP, …) draws from the composer *and* the
+    author pool, so a party who is both holds 25% + 25% — while still being
+    placed in the Composer block. Roles outside the three pools (arranger,
+    sub-publisher, income participant, …) own no part of the 100%.
+    """
+    code = (role or "").strip().upper()
+    group = role_group(code)
+    if group == "C":
+        return {"C", "A"} if "A" in code else {"C"}
+    if group in ("A", "E"):
+        return {group}
+    return set()
+
+
+def allocate_shares(parties: list[dict], role_col: str) -> tuple[list[float], list[str]]:
+    """Split 25 / 25 / 50 across one work's interested parties.
+
+    Returns the share per party (same order as `parties`) and the pools nothing
+    could be allocated to. A missing pool is never redistributed — the parties
+    that are present keep exactly what their own pool entitles them to.
+
+    A pool that doesn't divide evenly (3 composers -> 8.3333…) is rounded to 4
+    decimals with the remainder going to the last holder, so the pool still adds
+    up to exactly its 25 / 50. An evenly divisible pool gives every holder the
+    identical share.
+    """
+    holders = {
+        pool: [i for i, p in enumerate(parties) if pool in share_pools(p[role_col])]
+        for pool in POOL_ORDER
+    }
+    shares = [0.0] * len(parties)
+    for pool, members in holders.items():
+        if not members:
+            continue
+        total = SHARE_POOLS[pool]
+        each = round(total / len(members), 4)
+        for i in members[:-1]:
+            shares[i] += each
+        shares[members[-1]] += round(total - each * (len(members) - 1), 4)
+    return shares, [pool for pool in POOL_ORDER if not holders[pool]]
+
+
+def format_share(value: float) -> str:
+    """25.0 -> "25", 12.5 -> "12.5", 25/3 -> "8.3333" (trailing zeros dropped)."""
+    return f"{value:.4f}".rstrip("0").rstrip(".") or "0"
+
+
+def issue_message(missing: list[str]) -> str:
+    """"Composer share not allocated", "Composer and Publisher share not
+    allocated" — blank when the full 100% was assigned."""
+    if not missing:
+        return ""
+    names = [POOL_LABEL[p] for p in missing]
+    joined = names[0] if len(names) == 1 else " and ".join([", ".join(names[:-1]), names[-1]])
+    return f"{joined} share not allocated"
+
+
 def group_label(group: str) -> str:
     """A role code we don't have a name for keeps its own code as the block
     label, so an unseen role still gets its own columns."""
@@ -296,6 +373,18 @@ def analyze(headers: list[str], rows: list[list]) -> dict:
     groups = ([g for g in GROUP_ORDER if g in max_per_group]
               + sorted(g for g in max_per_group if g not in GROUP_ORDER))
 
+    # Ownership allocation, per work: the calculated share overwrites Performance
+    # Share, and any pool with no holder is reported in the Issue column rather
+    # than being shared out among the roles that are present.
+    share_col = lookup.get(_norm_header(SHARE_COLUMN))
+    issues: dict[str, str] = {}
+    for work_key, parties in works.items():
+        shares, missing = allocate_shares(parties, role_col)
+        if share_col is not None:
+            for party, share in zip(parties, shares):
+                party[share_col] = format_share(share)
+        issues[work_key] = issue_message(missing)
+
     return {
         "key": key,
         "role_col": role_col,
@@ -309,6 +398,8 @@ def analyze(headers: list[str], rows: list[list]) -> dict:
         "max_per_group": max_per_group,
         "total_parties": len(records),
         "duplicates": duplicates,
+        "share_column": share_col,
+        "issues": issues,
     }
 
 
@@ -337,10 +428,12 @@ def build(info: dict, variant: str) -> dict:
     def slot(group: str, i: int, source: str) -> str:
         return f"{group_label(group)} {i + 1} {field_label(info, source)}"
 
-    columns = work_cols + [slot(g, i, f) for g in groups for i in range(budget[g]) for f in fields]
+    slots = [slot(g, i, f) for g in groups for i in range(budget[g]) for f in fields]
+    columns = work_cols + slots + [ISSUE_COLUMN]
     out_rows, expected = [], []
-    for parties in info["works"].values():
+    for work_key, parties in info["works"].items():
         row = {c: parties[0][c] for c in work_cols}
+        row[ISSUE_COLUMN] = info["issues"].get(work_key, "")
         for g in groups:
             members = [p for p in parties if role_group(p[role_col]) == g]
             for i in range(budget[g]):
@@ -354,7 +447,7 @@ def build(info: dict, variant: str) -> dict:
     return {
         "columns": columns,
         "work_columns": work_cols,
-        "party_columns": columns[len(work_cols):],
+        "party_columns": slots,
         "rows": out_rows,
         "fields": fields,
         "expected": expected,
@@ -413,6 +506,22 @@ def validate(info: dict, built: dict, variant: str) -> list[dict]:
     add("Society codes stripped of their numeric prefix", True, "052:PRS -> PRS")
     add("Party fields included", True,
         ", ".join(field_label(info, f) for f in fields))
+
+    # Ownership allocation.
+    flagged = [k for k, message in info["issues"].items() if message]
+    add("Ownership split 25 / 25 / 50 by role", True,
+        "composer 25%, author 25%, publisher 50% — each pool divided equally "
+        "between its parties, combined roles (CA) drawing from both writer pools")
+    if info["share_column"] is not None:
+        add("Calculated share written to Performance Share", True,
+            f"column {info['share_column']}")
+    else:
+        add("Calculated share written to Performance Share", False,
+            f"the report has no {SHARE_COLUMN} column, so the allocation could not be written")
+    add("Full 100% ownership allocated in every work", not flagged,
+        f"all {n_works} works fully allocated" if not flagged
+        else f"{len(flagged)} of {n_works} works are missing a role — named in the "
+             f"{ISSUE_COLUMN} column, remaining percentage left unallocated")
     combined = sorted({p[role_col] for parties in info["works"].values() for p in parties
                        if role_group(p[role_col]) == "C" and p[role_col].strip().upper() != "C"})
     if combined:
@@ -481,12 +590,16 @@ def to_workbook(info: dict, built: dict, checks: list[dict]) -> bytes:
     fills = {g: PatternFill("solid", fgColor=_PALETTE[i % len(_PALETTE)])
              for i, g in enumerate(info["groups"])}
     work_fill = PatternFill("solid", fgColor="D9D9D9")
+    issue_fill = PatternFill("solid", fgColor="FFC7CE")
     for j, name in enumerate(columns, 1):
         cell = ws.cell(1, j)
         cell.font = Font(bold=True)
         cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-        cell.fill = fills.get(column_group.get(name), work_fill)
-        ws.column_dimensions[get_column_letter(j)].width = min(max(12, len(str(name)) + 2), 30)
+        cell.fill = (issue_fill if name == ISSUE_COLUMN
+                     else fills.get(column_group.get(name), work_fill))
+        ws.column_dimensions[get_column_letter(j)].width = (
+            38 if name == ISSUE_COLUMN else min(max(12, len(str(name)) + 2), 30)
+        )
     ws.row_dimensions[1].height = 34
     ws.freeze_panes = "A2"
     ws.auto_filter.ref = ws.dimensions

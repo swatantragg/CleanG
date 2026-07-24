@@ -280,6 +280,32 @@ class ActivityLog(Base):
     )
 
 
+class FileActivity(Base):
+    """Who worked on which file — the admin Activity view.
+
+    Deliberately narrow: it answers "user1 worked on file1.xlsx", nothing about
+    what was done to the file. One row per file a user touches in an area of the
+    app (a branch upload, a standardization run, …). The user's name and email
+    are snapshotted so the trail still reads correctly after an account is
+    renamed or deleted (`user_id` then falls back to NULL).
+    """
+
+    __tablename__ = "file_activity"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    user_name: Mapped[str] = mapped_column(String(255), default="")
+    user_email: Mapped[str] = mapped_column(String(255), default="", index=True)
+    filename: Mapped[str] = mapped_column(String(512), index=True)
+    # Where in the app the file was worked on ("Branch upload", "Reverse PRS", …).
+    area: Mapped[str] = mapped_column(String(64), default="")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), index=True
+    )
+
+
 class AuditEvent(Base):
     """Security audit trail for authentication and privileged actions.
 

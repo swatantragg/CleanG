@@ -21,8 +21,10 @@ from fastapi import (
     UploadFile,
     status,
 )
+from sqlalchemy.orm import Session
 
 from ..config import get_settings
+from ..core.activity import log_file_activity
 from ..core.excel import MAX_BYTES
 from ..core.http import content_disposition
 from ..core.limiter import limiter
@@ -35,6 +37,7 @@ from ..core.prs import (
     prepare,
     to_workbook,
 )
+from ..database import get_db
 from ..deps import get_current_user
 from ..models import User
 from ..schemas import PrsCheck, PrsGroup, PrsPreview
@@ -65,7 +68,8 @@ async def _read(file: UploadFile) -> tuple[str, bytes]:
 async def preview(
     request: Request,
     file: UploadFile = File(...),
-    _user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
 ):
     """Consolidate the upload and return the resulting layout, the validation
     report and a sample of rows, so the user can confirm before downloading."""
@@ -78,6 +82,7 @@ async def preview(
 
     built, checks = full["built"], full["checks"]
     core = build(info, "core")
+    log_file_activity(db, user, name, "PRS standardization")
     return PrsPreview(
         filename=name,
         work_key=info["key"],
@@ -91,6 +96,7 @@ async def preview(
         rows=built["rows"][:PREVIEW_ROWS],
         groups=[PrsGroup(**g) for g in group_summary(info)],
         checks=[PrsCheck(**c) for c in checks],
+        works_with_issues=sum(1 for message in info["issues"].values() if message),
     )
 
 
@@ -100,7 +106,8 @@ async def download(
     request: Request,
     file: UploadFile = File(...),
     variant: str = Form("full"),
-    _user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
 ):
     """Stream the consolidated workbook(s): the full field set, the core field
     set, or both together in a .zip."""
@@ -124,6 +131,7 @@ async def download(
     except PrsError as exc:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, exc.message)
 
+    log_file_activity(db, user, name, "PRS standardization")
     if len(books) == 1:
         filename, payload = books[0]
         media_type = _XLSX_MIME
