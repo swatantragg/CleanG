@@ -1,6 +1,7 @@
 import { useRef, useState } from "react";
 import Icon from "../components/Icon.jsx";
 import PrsStandardize from "./PrsStandardize.jsx";
+import ReversePrs from "./ReversePrs.jsx";
 import { formatBytes, postDownload, postJSON, saveBlob } from "../api/upload.js";
 
 const MAX_BYTES = 20 * 1024 * 1024;
@@ -282,14 +283,17 @@ function MasterStandardize() {
 }
 
 // The Standardize section holds one tab per standardization flow: the generic
-// master-format re-shape, and the PRS work-report consolidation.
+// master-format re-shape, the PRS work-report consolidation, and its reverse —
+// a work sheet expanded into the MLC Bulk Work format.
 const TABS = [
-  { id: "master", label: "Master format", icon: "sparkles" },
-  { id: "prs", label: "PRS standardization", icon: "table" },
+  { id: "master", label: "Master format", icon: "sparkles", view: MasterStandardize },
+  { id: "prs", label: "PRS standardization", icon: "table", view: PrsStandardize },
+  { id: "reverse", label: "Reverse PRS", icon: "arrowRight", view: ReversePrs },
 ];
 
 export default function Standardize() {
   const [tab, setTab] = useState("master");
+  const View = TABS.find((t) => t.id === tab).view;
 
   return (
     <section className="standardize-page">
@@ -313,7 +317,7 @@ export default function Standardize() {
         ))}
       </div>
 
-      {tab === "master" ? <MasterStandardize /> : <PrsStandardize />}
+      <View />
     </section>
   );
 }

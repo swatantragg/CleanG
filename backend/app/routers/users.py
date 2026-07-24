@@ -6,9 +6,10 @@ from sqlalchemy.orm import Session
 from ..core.audit import log_event
 from ..database import get_db
 from ..deps import require_admin
-from ..models import AuditEvent, User
+from ..models import AuditEvent, FileActivity, User
 from ..schemas import (
     AuditEventOut,
+    FileActivityOut,
     PasswordReset,
     UserCreate,
     UserOut,
@@ -161,6 +162,24 @@ def delete_user(
         db, request, "user_deleted", user=admin,
         detail=f"deleted {email} (id={user_id})",
     )
+
+
+@router.get("/activity", response_model=list[FileActivityOut])
+def file_activity(
+    limit: int = Query(200, ge=1, le=1000),
+    user_id: int | None = Query(None),
+    db: Session = Depends(get_db),
+    _admin: User = Depends(require_admin),
+):
+    """Admin-only: which files each user worked on, most recent first.
+
+    Optionally narrowed to one user. It reports the file and the area of the app
+    only — never what was done to the data.
+    """
+    query = select(FileActivity).order_by(FileActivity.created_at.desc()).limit(limit)
+    if user_id is not None:
+        query = query.where(FileActivity.user_id == user_id)
+    return db.scalars(query).all()
 
 
 @router.get("/audit", response_model=list[AuditEventOut])

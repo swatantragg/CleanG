@@ -47,6 +47,20 @@ class Token(BaseModel):
     token_type: str = "bearer"
 
 
+class FileActivityOut(BaseModel):
+    """One entry of the admin Activity view: who worked on which file, and when."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    user_id: int | None
+    user_name: str
+    user_email: str
+    filename: str
+    area: str
+    created_at: datetime
+
+
 class AuditEventOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -355,10 +369,43 @@ class PrsPreview(BaseModel):
     source_rows: int
     duplicates_removed: int
     work_columns: list[str]
-    columns: list[str]  # full-variant columns, in order
+    columns: list[str]  # full-variant columns, in order (ends with "Issue")
     core_columns: list[str]  # core-variant columns, in order
     rows: list[dict]  # sample rows of the full variant
     groups: list[PrsGroup]
+    checks: list[PrsCheck]
+    # Works that could not allocate the whole 100% (a role has no party). Their
+    # shares are kept as calculated and the gap is named in the Issue column.
+    works_with_issues: int = 0
+
+
+# ---- Reverse PRS (MLC Bulk Work) ----
+class MlcMapping(BaseModel):
+    """How one MLC column is filled (blank `source` = intentionally left empty)."""
+
+    column: str
+    source: str
+
+
+class MlcPreview(BaseModel):
+    """Preview of a work sheet expanded into the MLC Bulk Work format: one row
+    per writer, work information on the first row of each work."""
+
+    filename: str
+    total_works: int
+    total_writers: int
+    composers: int
+    lyricists: int
+    # Writers credited as composer AND lyricist of the same work: one row, CA.
+    combined: int = 0
+    source_rows: int
+    # Rows per output sheet: the workbook continues on "Part 2", "Part 3", …
+    # every 300 rows, and a song is never split across two of them.
+    part_rows: list[int] = []
+    columns: list[str]  # the 21 MLC template columns, in order
+    rows: list[dict]  # sample rows, keyed by MLC column
+    mapping: list[MlcMapping]
+    unmapped_columns: list[str]  # source columns the MLC template has no field for
     checks: list[PrsCheck]
 
 
