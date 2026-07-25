@@ -2524,6 +2524,16 @@ export default function ReviewStep({ file, onCommitted }) {
                       <option value={0.8}>≥ 80%</option>
                       <option value={0.7}>≥ 70% (loose)</option>
                     </select>
+                    <span
+                      className="similar-count"
+                      title="Close matches found at this similarity"
+                    >
+                      {similarLoading
+                        ? "…"
+                        : `${similarMatches.length} ${
+                            similarMatches.length === 1 ? "match" : "matches"
+                          }`}
+                    </span>
                   </label>
                 </div>
               )}
