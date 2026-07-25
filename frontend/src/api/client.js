@@ -30,8 +30,47 @@ const GATEWAY_MESSAGE = {
   504: "The server took too long to respond. Please try again.",
 };
 
+// FastAPI reports errors under `detail`, but the shape varies: a plain string
+// for HTTPExceptions, an ARRAY of {loc,msg,type} for request-validation (422)
+// errors, or occasionally an object. Coerce every shape to a readable sentence so
+// the UI never surfaces a raw "[object Object]" (which is what `new Error(obj)`
+// produces). Returns null when nothing usable is found, so the caller can fall
+// back to a status-based message.
+function detailToMessage(detail) {
+  if (!detail) return null;
+  if (typeof detail === "string") return detail;
+  if (Array.isArray(detail)) {
+    const msgs = detail
+      .map((d) => {
+        if (typeof d === "string") return d;
+        if (d && typeof d.msg === "string") {
+          // Pydantic prefixes custom validator errors with "Value error, ";
+          // drop it, and label with the offending field when we can.
+          const msg = d.msg.replace(/^Value error,\s*/i, "");
+          const loc = Array.isArray(d.loc) ? d.loc : [];
+          const field = loc.filter((p) => p !== "body").pop();
+          return field && typeof field === "string" ? `${field}: ${msg}` : msg;
+        }
+        return null;
+      })
+      .filter(Boolean);
+    return msgs.length ? msgs.join(" ") : null;
+  }
+  if (typeof detail === "object") {
+    if (typeof detail.message === "string") return detail.message;
+    if (typeof detail.msg === "string") return detail.msg;
+    try {
+      return JSON.stringify(detail);
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
 function errorMessage(status, data) {
-  if (data && data.detail) return data.detail;
+  const fromDetail = data ? detailToMessage(data.detail) : null;
+  if (fromDetail) return fromDetail;
   return GATEWAY_MESSAGE[status] || `Request failed (${status})`;
 }
 
