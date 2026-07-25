@@ -58,6 +58,8 @@ from ..schemas import (
     RowsBatchEdit,
     RowsDrop,
     RowsRevert,
+    SimilarCount,
+    SimilarCountsOut,
     SimilarValue,
     SimilarValuesOut,
     TagGroup,
@@ -346,6 +348,7 @@ def _edit_in_place(f: UploadedFile, changed: set[int]) -> bool:
     entry["sig"] = _signature(f)
     entry["summary"] = None
     entry["profile"] = None
+    entry.pop("sim_counts", None)  # edited values can change near-match counts
     return True
 
 
@@ -966,6 +969,118 @@ def column_similar_values(
         column=column,
         value=value,
         matches=[SimilarValue(value=v, count=n, ratio=round(r, 4)) for v, n, r in matches],
+    )
+
+
+# The 90/80/70 badge on every unique-values row is an all-pairs similarity scan,
+# O(distinct²). Skip it above this many distinct values — high-cardinality columns
+# (UPCs, ISRCs) aren't merge targets, and the scan would be too slow to run inline.
+_SIM_COUNT_MAX_DISTINCT = 2000
+
+
+def _similar_counts(f: UploadedFile, column: str) -> dict[str, tuple[int, int, int]] | None:
+    """For every distinct value of `column`, how many OTHER distinct values fall
+    within 90 / 80 / 70% similarity — cumulative, so c90 <= c80 <= c70.
+
+    Each count equals exactly what `column_similar_values` (the "find similar" popup)
+    would list for that value at the matching strictness: same normalization, same
+    token-sorted rescue for multi-word names, same "identical once normalized -> skip"
+    rule. So a row's "90" badge is the popup's ≥90% match count, guaranteed.
+
+    Returns None (no badges) when the column has too many distinct values to score.
+    Pruning is lossless: real_quick_ratio and quick_ratio are upper bounds on ratio,
+    so a pair skipped by them can never clear the 70% floor."""
+    counts: Counter = Counter()
+    for r in build_rows(f):
+        for piece in _value_pieces(column, r.values.get(column, "")):
+            counts[piece] += 1
+
+    # One entry per distinct raw value, with its normalized form pre-computed.
+    entries: list[tuple[str, str, bool, str]] = []
+    for v in counts:
+        nv = _dedup_norm(v)
+        if not nv:
+            continue
+        multi = " " in nv
+        entries.append((v, nv, multi, _token_sorted(nv) if multi else nv))
+    if len(entries) > _SIM_COUNT_MAX_DISTINCT:
+        return None
+
+    result: dict[str, tuple[int, int, int]] = {}
+    for raw_i, base, base_multi, base_sorted in entries:
+        la = len(base)
+        sm = difflib.SequenceMatcher(None, "", base, autojunk=False)
+        smt = (
+            difflib.SequenceMatcher(None, "", base_sorted, autojunk=False)
+            if base_multi
+            else None
+        )
+        c9 = c8 = c7 = 0
+        for _raw_j, nv, _mj, nvs in entries:
+            if nv == base:
+                continue  # identical once normalized (incl. self) -> nothing to merge
+            lb = len(nv)
+            if 2 * min(la, lb) < 0.7 * (la + lb):
+                continue  # length alone rules out a 70% match (cheap upper bound)
+            sm.set_seq1(nv)
+            # quick_ratio (char-multiset bound) then real_quick_ratio (length bound)
+            # gate the O(len²) full ratio — both are upper bounds, so lossless.
+            if sm.quick_ratio() < 0.7 or sm.real_quick_ratio() < 0.7:
+                ratio = 0.0
+            else:
+                ratio = sm.ratio()
+            if base_multi:
+                smt.set_seq1(nvs)
+                if smt.real_quick_ratio() >= 0.7 and smt.quick_ratio() >= 0.7:
+                    r2 = smt.ratio()
+                    if r2 > ratio:
+                        ratio = r2
+            if ratio >= 0.7:
+                c7 += 1
+                if ratio >= 0.8:
+                    c8 += 1
+                    if ratio >= 0.9:
+                        c9 += 1
+        if c7:  # values with no near-match at all carry no badge
+            result[raw_i] = (c9, c8, c7)
+    return result
+
+
+def _get_similar_counts(f: UploadedFile, column: str):
+    """Memoise `_similar_counts` on the file's clean-cache entry, keyed by column.
+    The entry is rebuilt (and this memo dropped) whenever the file's signature
+    changes, so the counts never go stale after an edit or merge."""
+    e = _entry(f)
+    cache = e.setdefault("sim_counts", {})
+    if column not in cache:
+        cache[column] = _similar_counts(f, column)
+    return cache[column]
+
+
+@router.get("/api/files/{file_id}/columns/similar-counts", response_model=SimilarCountsOut)
+def column_similar_counts(
+    file_id: int,
+    column: str,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Per-value 90/80/70 near-match counts for a whole column — powers the badges on
+    the unique-values panel so a reviewer sees at a glance which values have spelling
+    variants to merge, without opening each one. See `_similar_counts` for the exact
+    (popup-matching) semantics. Only values with a match are returned."""
+    f = _get_file_or_404(file_id, user, db)
+    if column not in _active_columns(f):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Column not found")
+    counts = _get_similar_counts(f, column)
+    if counts is None:
+        return SimilarCountsOut(column=column, computed=False, counts=[])
+    return SimilarCountsOut(
+        column=column,
+        computed=True,
+        counts=[
+            SimilarCount(value=v, c90=c9, c80=c8, c70=c7)
+            for v, (c9, c8, c7) in counts.items()
+        ],
     )
 
 

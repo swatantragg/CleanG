@@ -3560,6 +3560,48 @@ body.x-resizing {
   color: var(--brand);
   border-color: var(--brand);
 }
+/* 90/80/70 near-match badges on each normal-mode row. Non-zero badges are clickable
+   (open "find similar" at that band); zeros are dim, inert markers. */
+.unique-simcounts {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.2rem;
+}
+.sim-badge {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.15rem;
+  min-width: 30px;
+  justify-content: center;
+  padding: 0.05rem 0.32rem;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.5;
+}
+.sim-badge .sim-pct {
+  font-size: 0.6rem;
+  font-weight: 700;
+  opacity: 0.7;
+}
+.sim-badge.has {
+  cursor: pointer;
+  color: var(--brand);
+  background: color-mix(in srgb, var(--brand) 14%, var(--surface));
+  border-color: color-mix(in srgb, var(--brand) 30%, transparent);
+}
+.sim-badge.has:hover {
+  background: color-mix(in srgb, var(--brand) 26%, var(--surface));
+  border-color: var(--brand);
+}
+.sim-badge.zero {
+  color: var(--muted);
+  opacity: 0.4;
+  cursor: default;
+}
 /* Similarity % badge in "find similar" mode. */
 .unique-ratio {
   flex: none;

@@ -488,6 +488,28 @@ class SimilarValuesOut(BaseModel):
     matches: list[SimilarValue]  # most-similar first, capped
 
 
+class SimilarCount(BaseModel):
+    """How many other distinct values of a column resemble one value, at each of
+    the three merge-strictness bands. Counts are cumulative (c90 <= c80 <= c70) and
+    equal exactly what the "find similar" popup would list at ≥90 / ≥80 / ≥70%."""
+
+    value: str
+    c90: int  # distinct near-matches at ≥ 90% similarity
+    c80: int  # ... at ≥ 80%
+    c70: int  # ... at ≥ 70%
+
+
+class SimilarCountsOut(BaseModel):
+    """Per-value near-match counts for a whole column, so the unique-values panel can
+    show a 90/80/70 badge on every row without a request per value. Only values with
+    at least one near-match at ≥70% are returned; the rest have no variants to merge.
+    Empty (computed=false) when the column has too many distinct values to score."""
+
+    column: str
+    computed: bool  # false -> skipped (very high-cardinality column); no badges
+    counts: list[SimilarCount]
+
+
 class CleanRowOut(BaseModel):
     # Rows are computed in memory, identified by their position in the file.
     row_index: int

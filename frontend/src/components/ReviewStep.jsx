@@ -169,6 +169,13 @@ export default function ReviewStep({ file, onCommitted }) {
   const [uniqueSearch, setUniqueSearch] = useState(""); // what the user is typing
   const [uniqueSearchQ, setUniqueSearchQ] = useState(""); // debounced, sent to server
   const [uniqueNonce, setUniqueNonce] = useState(0); // bump to force a re-fetch
+  // Per-value near-match counts for the whole column: value -> {c90,c80,c70}.
+  // Powers the 90/80/70 badges on each row so variants are visible without opening
+  // every value. Only values with a match are present; the rest have no variants.
+  const [similarCounts, setSimilarCounts] = useState({});
+  // "loading" | "ready" | "skip" — "skip" for high-cardinality columns the scan
+  // sits out; those rows fall back to the ✦ button instead of badges.
+  const [similarCountsMode, setSimilarCountsMode] = useState("loading");
   const [uniqueSortKey, setUniqueSortKey] = useState("count"); // count | value
   const [uniqueSortDir, setUniqueSortDir] = useState("desc"); // asc | desc
   // Panel width is user-draggable (long names get truncated at the default
@@ -179,6 +186,9 @@ export default function ReviewStep({ file, onCommitted }) {
   // it instead of back at the top of a long list.
   const lastPickRef = useRef({});
   const scrollToRef = useRef(null); // value to scroll to once the list renders
+  // Value to jump back to when leaving "find similar" mode (Cancel/back), so the
+  // reviewer lands on the name they clicked rather than the top of the list.
+  const similarResumeRef = useRef(null);
   const savingRef = useRef(new Set()); // row indexes with a save in flight
 
   // --- Tab-wide grid search (works in every view tab) ---
@@ -437,6 +447,63 @@ export default function ReviewStep({ file, onCommitted }) {
       row.offsetTop - list.clientHeight / 2 + row.offsetHeight / 2
     );
   }, [uniqueCol, uniqueValues]);
+
+  // Near-match counts for every value in the open column, for the 90/80/70 badges.
+  // Column-wide (not affected by the in-panel search), so it's keyed only on the
+  // column and the post-merge nonce. Loads alongside the value list; badges fill in
+  // when it lands. A cancel flag drops a stale response after switching columns.
+  useEffect(() => {
+    if (!uniqueCol) {
+      setSimilarCounts({});
+      setSimilarCountsMode("loading");
+      return;
+    }
+    let cancelled = false;
+    setSimilarCounts({});
+    setSimilarCountsMode("loading");
+    (async () => {
+      try {
+        const d = await api(
+          `/api/files/${file.id}/columns/similar-counts?column=${encodeURIComponent(
+            uniqueCol
+          )}`
+        );
+        if (cancelled) return;
+        const map = {};
+        for (const c of d.counts || [])
+          map[c.value] = { c90: c.c90, c80: c.c80, c70: c.c70 };
+        setSimilarCounts(map);
+        setSimilarCountsMode(d.computed ? "ready" : "skip");
+      } catch {
+        // Non-fatal: the panel is fully usable without badges (the ✦/find-similar
+        // flow still works), so a failure just falls back to the ✦ button.
+        if (!cancelled) {
+          setSimilarCounts({});
+          setSimilarCountsMode("skip");
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [uniqueCol, uniqueNonce, file.id]);
+
+  // Leaving "find similar" mode (Cancel/back, no merge applied) drops the reviewer
+  // back on the value they clicked into, not the top of the list. The full list is
+  // already in the DOM when similarBase clears, so this runs right after that commit.
+  useEffect(() => {
+    if (similarBase || !similarResumeRef.current) return;
+    const target = similarResumeRef.current;
+    similarResumeRef.current = null;
+    const list = uniqueListRef.current;
+    if (!list) return;
+    const row = list.querySelector(`[data-uval="${CSS.escape(String(target))}"]`);
+    if (!row) return;
+    list.scrollTop = Math.max(
+      0,
+      row.offsetTop - list.clientHeight / 2 + row.offsetHeight / 2
+    );
+  }, [similarBase]);
 
   // A window resize can leave a remembered width wider than the viewport.
   useEffect(() => {
@@ -951,12 +1018,17 @@ export default function ReviewStep({ file, onCommitted }) {
     }
   }
 
-  function findSimilar(value) {
+  // Open "find similar" for a value. `ratio` lets a clicked 90/80/70 badge open the
+  // flow at that exact strictness; it defaults to the current dropdown setting (the
+  // ✦ button). The clicked value is remembered so Cancel/back returns to it.
+  function findSimilar(value, ratio = similarRatio) {
+    similarResumeRef.current = value;
     setMergeMode(true);
     setMergeConfirm(null);
     setSimilarBase(value);
+    setSimilarRatio(ratio);
     setMergeTarget(value); // the clicked value is the canonical keeper by default
-    loadSimilar(value, similarRatio);
+    loadSimilar(value, ratio);
   }
 
   // Re-run the similarity search when the reviewer loosens/tightens the strictness.
@@ -1003,6 +1075,11 @@ export default function ReviewStep({ file, onCommitted }) {
         }
       );
       applyPayload(d);
+      // Land back on the canonical value once the refreshed list arrives (it
+      // survives the merge); the reload's own scroll effect owns this, so hand the
+      // in-mode resume ref off to it to avoid a double jump.
+      similarResumeRef.current = null;
+      scrollToRef.current = mergeConfirm.to;
       resetMerge();
       setUniqueNonce((n) => n + 1); // re-fetch the unique list (variant is gone now)
     } catch (err) {
@@ -2673,13 +2750,51 @@ export default function ReviewStep({ file, onCommitted }) {
                             {u.value}
                           </span>
                         </label>
-                        <button
-                          className="unique-similar-btn"
-                          onClick={() => findSimilar(u.value)}
-                          title={`Find & merge values similar to “${u.value}”`}
-                        >
-                          <Icon name="sparkles" size={13} />
-                        </button>
+                        {similarCountsMode === "ready" ? (
+                          // 90/80/70 near-match counts. Cumulative (c90≤c80≤c70), and
+                          // each equals what the popup lists at that strictness. A
+                          // non-zero badge opens "find similar" pre-set to its band;
+                          // a zero is a dim, non-interactive marker.
+                          <span
+                            className="unique-simcounts"
+                            title={`Names similar to “${u.value}” (≥90 / ≥80 / ≥70%). Click a count to review & merge.`}
+                          >
+                            {[
+                              [90, 0.9, similarCounts[u.value]?.c90 || 0],
+                              [80, 0.8, similarCounts[u.value]?.c80 || 0],
+                              [70, 0.7, similarCounts[u.value]?.c70 || 0],
+                            ].map(([pct, ratio, n]) =>
+                              n > 0 ? (
+                                <button
+                                  key={pct}
+                                  type="button"
+                                  className="sim-badge has"
+                                  onClick={() => findSimilar(u.value, ratio)}
+                                  title={`${n} name${n === 1 ? "" : "s"} within ${pct}% of “${u.value}” — click to review & merge`}
+                                >
+                                  <span className="sim-pct">{pct}</span>
+                                  {n}
+                                </button>
+                              ) : (
+                                <span
+                                  key={pct}
+                                  className="sim-badge zero"
+                                  title={`No names within ${pct}% of “${u.value}”`}
+                                >
+                                  <span className="sim-pct">{pct}</span>0
+                                </span>
+                              )
+                            )}
+                          </span>
+                        ) : (
+                          <button
+                            className="unique-similar-btn"
+                            onClick={() => findSimilar(u.value)}
+                            title={`Find & merge values similar to “${u.value}”`}
+                          >
+                            <Icon name="sparkles" size={13} />
+                          </button>
+                        )}
                         <span className="unique-count">{u.count}</span>
                       </div>
                     );
