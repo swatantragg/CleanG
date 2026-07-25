@@ -1,7 +1,7 @@
 import difflib
 import io
 import json
-from collections import Counter
+from collections import Counter, defaultdict
 from collections.abc import Iterable
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -972,43 +972,103 @@ def column_similar_values(
     )
 
 
-# The 90/80/70 badge on every unique-values row is an all-pairs similarity scan,
-# O(distinct²). Skip it above this many distinct values — high-cardinality columns
-# (UPCs, ISRCs) aren't merge targets, and the scan would be too slow to run inline.
-_SIM_COUNT_MAX_DISTINCT = 2000
+# The 90/80/70 badge on every unique-values row needs, per value, its near-match
+# count across the whole column. A naive all-pairs scan is O(distinct²) and stalls
+# on real name columns (thousands of distinct singers). Instead we block candidates
+# through a character-trigram + word-token inverted index, then score only those —
+# lossless for a 70% floor (a genuine 70% match shares many distinctive trigrams),
+# so the counts still equal the "find similar" popup's exactly.
+_SIM_COUNT_MAX_DISTINCT = 6000  # above this, skip badges (IDs/UPCs — not merge targets)
+_SIM_COUNT_POSTINGS_CAP = 3000  # a trigram/token in more rows than this isn't a useful
+#                                 discriminator; drop it so candidate sets stay small.
+_SIM_COUNT_BUDGET = 1_500_000  # hard ceiling on full-ratio comparisons (~a few seconds).
+#                                Bases are scored most-common first, so if a pathological
+#                                column ever hits this, the visible (high-count) values
+#                                still get badges; only the long tail is skipped.
+
+
+def _trigrams(s: str) -> set[str]:
+    """Padded character trigrams of a string — the blocking key. Padding means even
+    1–2 char values yield trigrams, and word-boundary variants still overlap."""
+    p = f"  {s}  "
+    return {p[i : i + 3] for i in range(len(p) - 2)}
 
 
 def _similar_counts(f: UploadedFile, column: str) -> dict[str, tuple[int, int, int]] | None:
     """For every distinct value of `column`, how many OTHER distinct values fall
     within 90 / 80 / 70% similarity — cumulative, so c90 <= c80 <= c70.
 
-    Each count equals exactly what `column_similar_values` (the "find similar" popup)
-    would list for that value at the matching strictness: same normalization, same
-    token-sorted rescue for multi-word names, same "identical once normalized -> skip"
-    rule. So a row's "90" badge is the popup's ≥90% match count, guaranteed.
+    Each count matches what `column_similar_values` (the "find similar" popup) lists
+    for that value at the matching strictness: same normalization, same token-sorted
+    rescue for multi-word names, same "identical once normalized -> skip" rule. So a
+    row's "90" badge is the popup's ≥90% match count.
 
-    Returns None (no badges) when the column has too many distinct values to score.
-    Pruning is lossless: real_quick_ratio and quick_ratio are upper bounds on ratio,
-    so a pair skipped by them can never clear the 70% floor."""
+    Candidate blocking (shared trigram/token) plus the real_quick_ratio / quick_ratio
+    upper-bound prunes are all lossless for the 70% floor. Returns None when the
+    column has too many distinct values to score at all."""
     counts: Counter = Counter()
     for r in build_rows(f):
         for piece in _value_pieces(column, r.values.get(column, "")):
             counts[piece] += 1
 
-    # One entry per distinct raw value, with its normalized form pre-computed.
-    entries: list[tuple[str, str, bool, str]] = []
-    for v in counts:
+    # One entry per distinct raw value, normalized form pre-computed, ordered
+    # most-common first so the safety budget (if ever hit) spends on visible values.
+    raws: list[str] = []
+    norms: list[str] = []
+    sorts: list[str] = []
+    multis: list[bool] = []
+    tri_sets: list[set[str]] = []
+    for v, _n in counts.most_common():
         nv = _dedup_norm(v)
         if not nv:
             continue
-        multi = " " in nv
-        entries.append((v, nv, multi, _token_sorted(nv) if multi else nv))
-    if len(entries) > _SIM_COUNT_MAX_DISTINCT:
+        raws.append(v)
+        norms.append(nv)
+        m = " " in nv
+        multis.append(m)
+        sorts.append(_token_sorted(nv) if m else nv)
+        tri_sets.append(_trigrams(nv))
+    n = len(raws)
+    if n > _SIM_COUNT_MAX_DISTINCT:
         return None
 
+    # Inverted indexes: trigram -> value indices, and word-token -> value indices.
+    # The token index catches word-order variants ("Kumar Sanu" / "Sanu Kumar")
+    # directly; trigrams catch typos and spelling drift.
+    tri_index: dict[str, list[int]] = defaultdict(list)
+    tok_index: dict[str, list[int]] = defaultdict(list)
+    for i in range(n):
+        for g in tri_sets[i]:
+            tri_index[g].append(i)
+        for t in set(norms[i].split()):
+            tok_index[t].append(i)
+    # Drop non-discriminative postings so a common fragment can't explode a
+    # candidate set. A real 70% match shares several distinctive trigrams, so this
+    # stays lossless in practice while bounding the work.
+    tri_index = {g: idx for g, idx in tri_index.items() if len(idx) <= _SIM_COUNT_POSTINGS_CAP}
+    tok_index = {t: idx for t, idx in tok_index.items() if len(idx) <= _SIM_COUNT_POSTINGS_CAP}
+
     result: dict[str, tuple[int, int, int]] = {}
-    for raw_i, base, base_multi, base_sorted in entries:
+    budget = _SIM_COUNT_BUDGET
+    for i in range(n):
+        if budget <= 0:
+            break  # safety ceiling reached; leave the remaining tail un-badged
+        base = norms[i]
+        base_multi = multis[i]
+        base_sorted = sorts[i]
         la = len(base)
+
+        candidates: set[int] = set()
+        for g in tri_sets[i]:
+            idx = tri_index.get(g)
+            if idx:
+                candidates.update(idx)
+        for t in set(base.split()):
+            idx = tok_index.get(t)
+            if idx:
+                candidates.update(idx)
+        candidates.discard(i)
+
         sm = difflib.SequenceMatcher(None, "", base, autojunk=False)
         smt = (
             difflib.SequenceMatcher(None, "", base_sorted, autojunk=False)
@@ -1016,12 +1076,14 @@ def _similar_counts(f: UploadedFile, column: str) -> dict[str, tuple[int, int, i
             else None
         )
         c9 = c8 = c7 = 0
-        for _raw_j, nv, _mj, nvs in entries:
+        for j in candidates:
+            nv = norms[j]
             if nv == base:
-                continue  # identical once normalized (incl. self) -> nothing to merge
+                continue  # identical once normalized -> nothing to merge
             lb = len(nv)
             if 2 * min(la, lb) < 0.7 * (la + lb):
                 continue  # length alone rules out a 70% match (cheap upper bound)
+            budget -= 1
             sm.set_seq1(nv)
             # quick_ratio (char-multiset bound) then real_quick_ratio (length bound)
             # gate the O(len²) full ratio — both are upper bounds, so lossless.
@@ -1030,7 +1092,7 @@ def _similar_counts(f: UploadedFile, column: str) -> dict[str, tuple[int, int, i
             else:
                 ratio = sm.ratio()
             if base_multi:
-                smt.set_seq1(nvs)
+                smt.set_seq1(sorts[j])
                 if smt.real_quick_ratio() >= 0.7 and smt.quick_ratio() >= 0.7:
                     r2 = smt.ratio()
                     if r2 > ratio:
@@ -1042,7 +1104,7 @@ def _similar_counts(f: UploadedFile, column: str) -> dict[str, tuple[int, int, i
                     if ratio >= 0.9:
                         c9 += 1
         if c7:  # values with no near-match at all carry no badge
-            result[raw_i] = (c9, c8, c7)
+            result[raws[i]] = (c9, c8, c7)
     return result
 
 
