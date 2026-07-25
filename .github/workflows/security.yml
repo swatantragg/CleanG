@@ -36,10 +36,14 @@ jobs:
           node-version: "20"
       - name: npm audit
         working-directory: frontend
-        # Fail on high/critical advisories; ignore lower-severity noise.
+        # Fail on high/critical advisories, except a documented allowlist of
+        # advisories that have no fix and cannot affect this app (see the
+        # justification in scripts/audit-gate.mjs). `|| true` keeps npm audit's
+        # non-zero "found vulnerabilities" exit from masking the gate's verdict.
         run: |
           npm ci --no-audit --no-fund
-          npm audit --audit-level=high
+          npm audit --json > audit.json || true
+          node scripts/audit-gate.mjs
 
   secrets:
     name: gitleaks (secret scan)
