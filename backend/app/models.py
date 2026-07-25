@@ -9,6 +9,9 @@ from .database import Base
 
 class UserRole(str, enum.Enum):
     admin = "admin"
+    # Sees, edits and deletes EVERY branch like an admin, but has no access to
+    # user management (can't create/list users or view the activity/audit trail).
+    superuser = "superuser"
     user = "user"
 
 

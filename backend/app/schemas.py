@@ -56,6 +56,10 @@ class FileActivityOut(BaseModel):
     user_id: int | None
     user_name: str
     user_email: str
+    # The actor's current role ("admin" / "superuser" / "user"), so the admin can
+    # tell at a glance that e.g. a super user worked on a branch. Null if the
+    # account was since deleted.
+    role: str | None = None
     filename: str
     area: str
     created_at: datetime

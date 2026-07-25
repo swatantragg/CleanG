@@ -31,7 +31,7 @@ from ..core.cleaning import (
 from ..core.http import content_disposition, safe_filename
 from ..core.master_store import find_conflicts, upsert_master_records
 from ..database import get_db
-from ..deps import get_current_user
+from ..deps import can_access_all_branches, get_current_user
 from ..models import (
     MASTER_COLUMN_TO_ATTR,
     ActivityLog,
@@ -39,7 +39,6 @@ from ..models import (
     FileStatus,
     UploadedFile,
     User,
-    UserRole,
 )
 from ..schemas import (
     BulkFix,
@@ -101,7 +100,7 @@ def _get_file_or_404(file_id: int, user: User, db: Session) -> UploadedFile:
     if f is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "File not found")
     branch = db.get(Branch, f.branch_id)
-    if user.role != UserRole.admin and branch.owner_id != user.id:
+    if not can_access_all_branches(user) and branch.owner_id != user.id:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Not your branch")
     return f
 

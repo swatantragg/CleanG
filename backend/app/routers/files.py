@@ -11,7 +11,7 @@ from ..core.excel import MAX_BYTES, ExcelValidationError, read_and_validate
 from ..core.limiter import limiter
 from ..core.matching import suggest_mapping
 from ..database import get_db
-from ..deps import get_current_user
+from ..deps import can_access_all_branches, get_current_user
 from ..models import (
     MASTER_COLUMN_TO_ATTR,
     Branch,
@@ -19,7 +19,6 @@ from ..models import (
     MasterColumn,
     UploadedFile,
     User,
-    UserRole,
 )
 from ..schemas import (
     AddMasterColumn,
@@ -38,7 +37,7 @@ def _get_branch_or_404(branch_id: int, user: User, db: Session) -> Branch:
     branch = db.get(Branch, branch_id)
     if branch is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Branch not found")
-    if user.role != UserRole.admin and branch.owner_id != user.id:
+    if not can_access_all_branches(user) and branch.owner_id != user.id:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Not your branch")
     return branch
 

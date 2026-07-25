@@ -3,7 +3,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from ..database import get_db
-from ..deps import get_current_user
+from ..deps import can_access_all_branches, get_current_user
 from ..models import (
     ActivityLog,
     Branch,
@@ -12,7 +12,6 @@ from ..models import (
     MasterRecord,
     UploadedFile,
     User,
-    UserRole,
 )
 from ..schemas import BranchCreate, BranchOut
 
@@ -31,7 +30,7 @@ def _get_branch_or_404(branch_id: int, user: User, db: Session) -> Branch:
     branch = db.get(Branch, branch_id)
     if branch is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Branch not found")
-    if user.role != UserRole.admin and branch.owner_id != user.id:
+    if not can_access_all_branches(user) and branch.owner_id != user.id:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Not your branch")
     return branch
 
@@ -81,7 +80,7 @@ def list_branches(
     renders rich cards from a single request (two cheap queries, no N+1).
     """
     stmt = select(Branch).order_by(Branch.created_at.desc())
-    if current_user.role != UserRole.admin:
+    if not can_access_all_branches(current_user):
         stmt = stmt.where(Branch.owner_id == current_user.id)
     branches = db.scalars(stmt).all()
     rollups = _rollups([b.id for b in branches], db)
@@ -124,15 +123,17 @@ def delete_branch(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Permanently delete a branch and everything stored under it. Admin-only.
+    """Permanently delete a branch and everything stored under it. Admins and super
+    users only (a plain user can't delete even their own).
 
     The committed master records, audit log and uploaded files all reference the
     branch via foreign keys without a DB-level cascade, so they're removed first
     (by branch_id) before the branch row itself.
     """
-    if current_user.role != UserRole.admin:
+    if not can_access_all_branches(current_user):
         raise HTTPException(
-            status.HTTP_403_FORBIDDEN, "Only an administrator can delete a branch."
+            status.HTTP_403_FORBIDDEN,
+            "Only an administrator or super user can delete a branch.",
         )
     branch = db.get(Branch, branch_id)
     if branch is None:

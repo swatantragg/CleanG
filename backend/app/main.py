@@ -59,6 +59,16 @@ def _migrate(db) -> None:
     `corrections`/`dropped` columns are added here for databases created before
     cleaning moved fully in-memory.
     """
+    # Add the 'superuser' value to the Postgres user_role enum for databases created
+    # before the role existed. ALTER TYPE ... ADD VALUE can't run inside a normal
+    # transaction on older Postgres, so use an autocommit connection; IF NOT EXISTS
+    # makes it a no-op once applied (and on fresh DBs where create_all already made
+    # the type with all current values).
+    if engine.dialect.name == "postgresql":
+        with engine.connect() as conn:
+            conn.execution_options(isolation_level="AUTOCOMMIT").execute(
+                text("ALTER TYPE user_role ADD VALUE IF NOT EXISTS 'superuser'")
+            )
     db.execute(text(
         "ALTER TABLE uploaded_files "
         "ADD COLUMN IF NOT EXISTS corrections JSONB NOT NULL DEFAULT '{}'::jsonb"

@@ -74,3 +74,15 @@ def require_admin(current_user: User = Depends(get_current_user)) -> User:
             detail="Admin privileges required",
         )
     return current_user
+
+
+# Roles that see and work on EVERY branch, not just their own. An admin has the
+# full app (incl. user management); a super user is scoped to branches only — this
+# helper is exactly the "any branch" privilege the two share.
+BRANCH_ADMIN_ROLES = (UserRole.admin, UserRole.superuser)
+
+
+def can_access_all_branches(user: User) -> bool:
+    """True for admins and super users, who may view, edit and delete any branch;
+    a plain user is limited to the branches they own."""
+    return user.role in BRANCH_ADMIN_ROLES

@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { api } from "../api/client.js";
 import { useAuth } from "../context/AuthContext.jsx";
 import Icon from "../components/Icon.jsx";
+import { ASSIGNABLE_ROLES, roleLabel } from "../utils/roles.js";
 
 const EMPTY = { email: "", full_name: "", password: "", role: "user" };
 
@@ -95,6 +96,11 @@ function Activity({ users }) {
               <tr key={a.id}>
                 <td>
                   <strong>{a.user_name || "—"}</strong>
+                  {a.role && (
+                    <span className="role-pill" style={{ marginLeft: "0.4rem" }}>
+                      {roleLabel(a.role)}
+                    </span>
+                  )}
                   <div className="muted small">{a.user_email}</div>
                 </td>
                 <td>
@@ -314,8 +320,11 @@ export default function AdminUsers() {
                 value={form.role}
                 onChange={(e) => update("role", e.target.value)}
               >
-                <option value="user">User</option>
-                <option value="admin">Admin</option>
+                {ASSIGNABLE_ROLES.map((r) => (
+                  <option key={r} value={r}>
+                    {roleLabel(r)}
+                  </option>
+                ))}
               </select>
             </label>
           </div>
@@ -353,8 +362,11 @@ export default function AdminUsers() {
                           isSelf ? "You can't change your own role" : "Change role"
                         }
                       >
-                        <option value="user">User</option>
-                        <option value="admin">Admin</option>
+                        {ASSIGNABLE_ROLES.map((r) => (
+                          <option key={r} value={r}>
+                            {roleLabel(r)}
+                          </option>
+                        ))}
                       </select>
                     </td>
                     <td>{u.is_active ? "Active" : "Disabled"}</td>

@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import { useAuth } from "../context/AuthContext.jsx";
 import Icon from "./Icon.jsx";
+import { roleLabel } from "../utils/roles.js";
 
 const THEME_KEY = "mrm_theme";
 
@@ -73,7 +74,7 @@ export default function Layout() {
           <div style={{ display: "flex", flexDirection: "column", lineHeight: 1.2 }}>
             <span className="user-name">{user?.full_name}</span>
             <span className="role-pill" style={{ alignSelf: "flex-start" }}>
-              {user?.role}
+              {roleLabel(user?.role)}
             </span>
           </div>
           <button className="btn ghost sm" onClick={handleLogout} title="Log out">

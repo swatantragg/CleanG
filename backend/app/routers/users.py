@@ -173,13 +173,31 @@ def file_activity(
 ):
     """Admin-only: which files each user worked on, most recent first.
 
-    Optionally narrowed to one user. It reports the file and the area of the app
-    only — never what was done to the data.
+    Optionally narrowed to one user. It reports the file, the area of the app and
+    the actor's role (so a super user's work is recognisable) — never what was done
+    to the data.
     """
-    query = select(FileActivity).order_by(FileActivity.created_at.desc()).limit(limit)
+    query = (
+        select(FileActivity, User.role)
+        .outerjoin(User, User.id == FileActivity.user_id)
+        .order_by(FileActivity.created_at.desc())
+        .limit(limit)
+    )
     if user_id is not None:
         query = query.where(FileActivity.user_id == user_id)
-    return db.scalars(query).all()
+    return [
+        FileActivityOut(
+            id=fa.id,
+            user_id=fa.user_id,
+            user_name=fa.user_name,
+            user_email=fa.user_email,
+            role=getattr(role, "value", role) if role is not None else None,
+            filename=fa.filename,
+            area=fa.area,
+            created_at=fa.created_at,
+        )
+        for fa, role in db.execute(query).all()
+    ]
 
 
 @router.get("/audit", response_model=list[AuditEventOut])
