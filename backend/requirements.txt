@@ -10,6 +10,10 @@ python-multipart==0.0.32
 email-validator==2.3.0
 openpyxl==3.1.5
 pandas==3.0.3
+# Pulled in by pandas, but imported directly by the review router: the 90/80/70
+# near-match badges prune candidate pairs with a vectorised character-multiset
+# bound before the (much slower) difflib scoring.
+numpy==2.4.6
 slowapi==0.1.9
 # Optional Redis backend for the shared rate limiter (set REDIS_URL to enable).
 redis==8.0.1
