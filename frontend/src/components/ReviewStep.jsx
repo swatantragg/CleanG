@@ -16,6 +16,10 @@ const UNIQUE_W_KEY = "cleang.uniquePanelWidth";
 const UNIQUE_W_DEFAULT = 380;
 const UNIQUE_W_MIN = 300;
 
+// The 90/80/70 near-match scan runs on the server in the background (seconds on a
+// big name column), so the panel polls this often until the counts land.
+const SIMILAR_COUNTS_POLL_MS = 2000;
+
 // Never wider than the viewport (minus a sliver of overlay to click away on).
 function clampUniqueWidth(w) {
   const max = Math.max(UNIQUE_W_MIN, window.innerWidth - 56);
@@ -171,10 +175,14 @@ export default function ReviewStep({ file, onCommitted }) {
   const [uniqueNonce, setUniqueNonce] = useState(0); // bump to force a re-fetch
   // Per-value near-match counts for the whole column: value -> {c90,c80,c70}.
   // Powers the 90/80/70 badges on each row so variants are visible without opening
-  // every value. Only values with a match are present; the rest have no variants.
+  // every value. Every value the server SCORED is present, zeros included — a value
+  // missing from this map wasn't scored, so its row keeps the ✦ button.
   const [similarCounts, setSimilarCounts] = useState({});
-  // "loading" | "ready" | "skip" — "skip" for high-cardinality columns the scan
-  // sits out; those rows fall back to the ✦ button instead of badges.
+  // "loading"    — first request in flight
+  // "computing"  — server is scanning the column in the background; we poll
+  // "ready"      — counts below are final
+  // "skip"       — high-cardinality column the scan sits out (or the request failed);
+  //                every row falls back to the ✦ button.
   const [similarCountsMode, setSimilarCountsMode] = useState("loading");
   const [uniqueSortKey, setUniqueSortKey] = useState("count"); // count | value
   const [uniqueSortDir, setUniqueSortDir] = useState("desc"); // asc | desc
@@ -450,8 +458,13 @@ export default function ReviewStep({ file, onCommitted }) {
 
   // Near-match counts for every value in the open column, for the 90/80/70 badges.
   // Column-wide (not affected by the in-panel search), so it's keyed only on the
-  // column and the post-merge nonce. Loads alongside the value list; badges fill in
-  // when it lands. A cancel flag drops a stale response after switching columns.
+  // column and the post-merge nonce.
+  //
+  // Scanning a big name column takes several seconds, so the server runs it on a
+  // worker thread and caches the result in the database (it therefore survives a
+  // restart or a redeploy). It answers "computing" until the scan lands, so we poll
+  // — the panel stays fully usable meanwhile, with the ✦ button on every row. A
+  // cancel flag drops a stale response/timer after switching columns.
   useEffect(() => {
     if (!uniqueCol) {
       setSimilarCounts({});
@@ -459,9 +472,10 @@ export default function ReviewStep({ file, onCommitted }) {
       return;
     }
     let cancelled = false;
+    let timer = null;
     setSimilarCounts({});
     setSimilarCountsMode("loading");
-    (async () => {
+    const poll = async () => {
       try {
         const d = await api(
           `/api/files/${file.id}/columns/similar-counts?column=${encodeURIComponent(
@@ -469,11 +483,18 @@ export default function ReviewStep({ file, onCommitted }) {
           )}`
         );
         if (cancelled) return;
+        // `status` is the current contract; `computed` keeps an older API working.
+        const status = d.status || (d.computed ? "ready" : "skipped");
+        if (status === "computing") {
+          setSimilarCountsMode("computing");
+          timer = setTimeout(poll, SIMILAR_COUNTS_POLL_MS);
+          return;
+        }
         const map = {};
         for (const c of d.counts || [])
           map[c.value] = { c90: c.c90, c80: c.c80, c70: c.c70 };
         setSimilarCounts(map);
-        setSimilarCountsMode(d.computed ? "ready" : "skip");
+        setSimilarCountsMode(status === "ready" ? "ready" : "skip");
       } catch {
         // Non-fatal: the panel is fully usable without badges (the ✦/find-similar
         // flow still works), so a failure just falls back to the ✦ button.
@@ -482,9 +503,11 @@ export default function ReviewStep({ file, onCommitted }) {
           setSimilarCountsMode("skip");
         }
       }
-    })();
+    };
+    poll();
     return () => {
       cancelled = true;
+      if (timer) clearTimeout(timer);
     };
   }, [uniqueCol, uniqueNonce, file.id]);
 
@@ -2540,6 +2563,14 @@ export default function ReviewStep({ file, onCommitted }) {
             <div className="unique-sortbar">
               <span className="muted small">
                 {uniqueValues.length} value{uniqueValues.length === 1 ? "" : "s"}
+                {/* The near-match scan runs server-side and can take a few
+                    seconds on a big name column; say so rather than leaving the
+                    ✦ buttons looking like the final state. */}
+                {similarCountsMode === "computing" && (
+                  <span className="sim-pending" title="Counting 90/80/70 near-matches for this column">
+                    <span className="sim-pending-dot" /> finding near-matches…
+                  </span>
+                )}
               </span>
               <div className="unique-sort-opts">
                 <span className="muted small">Sort by</span>
@@ -2750,19 +2781,21 @@ export default function ReviewStep({ file, onCommitted }) {
                             {u.value}
                           </span>
                         </label>
-                        {similarCountsMode === "ready" ? (
+                        {similarCounts[u.value] ? (
                           // 90/80/70 near-match counts. Cumulative (c90≤c80≤c70), and
                           // each equals what the popup lists at that strictness. A
                           // non-zero badge opens "find similar" pre-set to its band;
-                          // a zero is a dim, non-interactive marker.
+                          // a zero is a dim, non-interactive marker. Values the scan
+                          // didn't reach have no entry at all and keep the ✦ button —
+                          // showing them "0" would be a lie.
                           <span
                             className="unique-simcounts"
                             title={`Names similar to “${u.value}” (≥90 / ≥80 / ≥70%). Click a count to review & merge.`}
                           >
                             {[
-                              [90, 0.9, similarCounts[u.value]?.c90 || 0],
-                              [80, 0.8, similarCounts[u.value]?.c80 || 0],
-                              [70, 0.7, similarCounts[u.value]?.c70 || 0],
+                              [90, 0.9, similarCounts[u.value].c90 || 0],
+                              [80, 0.8, similarCounts[u.value].c80 || 0],
+                              [70, 0.7, similarCounts[u.value].c70 || 0],
                             ].map(([pct, ratio, n]) =>
                               n > 0 ? (
                                 <button
@@ -2788,9 +2821,15 @@ export default function ReviewStep({ file, onCommitted }) {
                           </span>
                         ) : (
                           <button
-                            className="unique-similar-btn"
+                            className={`unique-similar-btn${
+                              similarCountsMode === "computing" ? " pending" : ""
+                            }`}
                             onClick={() => findSimilar(u.value)}
-                            title={`Find & merge values similar to “${u.value}”`}
+                            title={
+                              similarCountsMode === "computing"
+                                ? `Counting near-matches for this column… — click to find & merge values similar to “${u.value}” now`
+                                : `Find & merge values similar to “${u.value}”`
+                            }
                           >
                             <Icon name="sparkles" size={13} />
                           </button>

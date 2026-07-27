@@ -3560,6 +3560,37 @@ body.x-resizing {
   color: var(--brand);
   border-color: var(--brand);
 }
+/* While the column's 90/80/70 scan is still running, every row shows ✦ — dim it
+   slightly so it reads as "not the final state", but keep it fully clickable
+   (the per-value "find similar" popup works without the badges). */
+.unique-similar-btn.pending {
+  opacity: 0.45;
+}
+.unique-similar-btn.pending:hover {
+  opacity: 1;
+}
+/* "finding near-matches…" note next to the value count while the scan runs. */
+.sim-pending {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  margin-left: 0.5rem;
+  color: var(--brand);
+}
+.sim-pending-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  animation: sim-pending-pulse 1.2s ease-in-out infinite;
+}
+@keyframes sim-pending-pulse {
+  0%, 100% { opacity: 0.25; }
+  50% { opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .sim-pending-dot { animation: none; opacity: 0.7; }
+}
 /* 90/80/70 near-match badges on each normal-mode row. Non-zero badges are clickable
    (open "find similar" at that band); zeros are dim, inert markers. */
 .unique-simcounts {

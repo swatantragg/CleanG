@@ -1,6 +1,6 @@
 import re
 from datetime import datetime
-from typing import Annotated
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 
@@ -505,12 +505,19 @@ class SimilarCount(BaseModel):
 
 class SimilarCountsOut(BaseModel):
     """Per-value near-match counts for a whole column, so the unique-values panel can
-    show a 90/80/70 badge on every row without a request per value. Only values with
-    at least one near-match at ≥70% are returned; the rest have no variants to merge.
-    Empty (computed=false) when the column has too many distinct values to score."""
+    show a 90/80/70 badge on every row without a request per value.
+
+    Scoring a big name column takes several seconds, so it runs in the background:
+    the first call answers `status="computing"` and the panel polls until
+    `status="ready"`. An entry is returned for EVERY value that was scored,
+    including all-zero ones — a value absent from `counts` was not scored (the
+    panel keeps the ✦ button for it) rather than "scored and has no variants"."""
 
     column: str
-    computed: bool  # false -> skipped (very high-cardinality column); no badges
+    # "ready" -> counts below are final | "computing" -> poll again shortly
+    # "skipped" -> too many distinct values to score; never any badges
+    status: Literal["ready", "computing", "skipped"]
+    computed: bool  # kept for older clients: true only when status == "ready"
     counts: list[SimilarCount]
 
 
