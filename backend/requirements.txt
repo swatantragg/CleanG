@@ -1,5 +1,5 @@
-fastapi==0.138.0
-uvicorn[standard]==0.52.0
+fastapi==0.141.1
+uvicorn[standard]==0.49.0
 sqlalchemy==2.0.51
 psycopg[binary]==3.2.3
 pydantic==2.13.4
@@ -13,10 +13,10 @@ pandas==3.0.3
 # Pulled in by pandas, but imported directly by the review router: the 90/80/70
 # near-match badges prune candidate pairs with a vectorised character-multiset
 # bound before the (much slower) difflib scoring.
-numpy==2.4.6
+numpy==2.5.1
 slowapi==0.1.9
 # Optional Redis backend for the shared rate limiter (set REDIS_URL to enable).
-redis==8.0.1
+redis==8.1.0
 # Daily-report scheduler. tzdata ships the IANA tz database so "Asia/Kolkata"
 # resolves inside the slim image (which has no system zoneinfo).
 APScheduler==3.10.4
