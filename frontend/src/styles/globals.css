@@ -665,7 +665,9 @@ input::placeholder {
 .content {
   max-width: 1280px;
   margin: 0 auto;
-  padding: 2.25rem 1.75rem 4rem;
+  /* The 4rem bottom gap used to keep the pinned version/credit badges off the
+     content; they're a real footer now, so only normal breathing room is left. */
+  padding: 2.25rem 1.75rem 2.5rem;
   animation: rise 0.4s cubic-bezier(0.22, 1, 0.36, 1);
 }
 /* The review/workspace screen is data-dense — let it use the full screen width
@@ -2844,42 +2846,36 @@ input::placeholder {
 }
 .section-locked .sec-title { display: flex; align-items: center; gap: 0.25rem; }
 
-/* Persistent credit — bottom-right on every page */
-.made-by {
-  position: fixed;
-  right: 12px;
-  bottom: 10px;
-  z-index: 80;
-  font-size: 0.72rem;
-  font-weight: 600;
-  color: var(--muted-2);
-  background: var(--surface-glass);
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  padding: 0.2rem 0.6rem;
-  backdrop-filter: blur(4px);
-  pointer-events: none;
-  user-select: none;
+/* Page footer — version stamp + credit, side by side.
+   In normal document flow at the very end of the page (NOT pinned to the
+   viewport), so it stays out of the way and only comes into view once the user
+   has scrolled all the way down. */
+.app-footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;  /* bottom-RIGHT of the page, in flow */
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 2rem;
+  padding: 1.1rem 1.5rem 1.4rem;
+  border-top: 1px solid var(--border);
 }
 
-/* Build/version stamp — bottom-right of every page, stacked just above the
-   "Developed By" badge so the two don't overlap. */
+.made-by,
 .version-badge {
-  position: fixed;
-  right: 12px;
-  bottom: 40px;
-  z-index: 80;
   font-size: 0.72rem;
-  font-weight: 700;
-  letter-spacing: 0.02em;
   color: var(--muted-2);
   background: var(--surface-glass);
   border: 1px solid var(--border);
   border-radius: 999px;
   padding: 0.2rem 0.6rem;
-  backdrop-filter: blur(4px);
-  pointer-events: none;
-  user-select: none;
+}
+.made-by {
+  font-weight: 600;
+}
+.version-badge {
+  font-weight: 700;
+  letter-spacing: 0.02em;
 }
 
 /* ============================================================

@@ -2720,10 +2720,15 @@ export default function ReviewStep({ file, onCommitted }) {
                     : uniqueValues;
                   const shown = [...filtered].sort((a, b) => {
                     if (uniqueSortKey === "value") {
-                      const cmp = a.value.localeCompare(b.value, undefined, {
-                        numeric: true,
-                        sensitivity: "base",
-                      });
+                      // Case-insensitive first, so variants of one value sit
+                      // together; then a case-sensitive tiebreak, so case-only
+                      // variants ("Film Songs" / "Film songs") keep a stable,
+                      // deterministic order instead of comparing equal.
+                      const cmp =
+                        a.value.localeCompare(b.value, undefined, {
+                          numeric: true,
+                          sensitivity: "base",
+                        }) || a.value.localeCompare(b.value);
                       return uniqueSortDir === "desc" ? -cmp : cmp;
                     }
                     return uniqueSortDir === "desc"
