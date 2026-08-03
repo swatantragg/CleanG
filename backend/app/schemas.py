@@ -1,6 +1,6 @@
 import re
 from datetime import datetime
-from typing import Annotated
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 
@@ -45,6 +45,24 @@ class ChangePassword(BaseModel):
 class Token(BaseModel):
     access_token: str
     token_type: str = "bearer"
+
+
+class FileActivityOut(BaseModel):
+    """One entry of the admin Activity view: who worked on which file, and when."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    user_id: int | None
+    user_name: str
+    user_email: str
+    # The actor's current role ("admin" / "superuser" / "user"), so the admin can
+    # tell at a glance that e.g. a super user worked on a branch. Null if the
+    # account was since deleted.
+    role: str | None = None
+    filename: str
+    area: str
+    created_at: datetime
 
 
 class AuditEventOut(BaseModel):
@@ -325,6 +343,76 @@ class StandardizePreview(BaseModel):
     filename: str
 
 
+# ---- PRS standardization ----
+class PrsCheck(BaseModel):
+    """One validation result from the PRS consolidation."""
+
+    check: str
+    ok: bool
+    detail: str = ""
+
+
+class PrsGroup(BaseModel):
+    """A role block and how many numbered columns the dataset needs for it."""
+
+    group: str  # "Composer", "Publisher", ...
+    roles: list[str]  # the source role codes routed into this block
+    columns: int  # numbered slots created (max occurrences in a single work)
+    parties: int  # total parties in this block
+
+
+class PrsPreview(BaseModel):
+    """Preview of a consolidated PRS report: layout, validation and a sample of
+    the one-row-per-work output. The full workbooks come from the download
+    endpoint."""
+
+    filename: str
+    work_key: str  # the identifier the rows were grouped by
+    total_works: int
+    total_parties: int
+    source_rows: int
+    duplicates_removed: int
+    work_columns: list[str]
+    columns: list[str]  # full-variant columns, in order (ends with "Issue")
+    core_columns: list[str]  # core-variant columns, in order
+    rows: list[dict]  # sample rows of the full variant
+    groups: list[PrsGroup]
+    checks: list[PrsCheck]
+    # Works that could not allocate the whole 100% (a role has no party). Their
+    # shares are kept as calculated and the gap is named in the Issue column.
+    works_with_issues: int = 0
+
+
+# ---- Reverse PRS (MLC Bulk Work) ----
+class MlcMapping(BaseModel):
+    """How one MLC column is filled (blank `source` = intentionally left empty)."""
+
+    column: str
+    source: str
+
+
+class MlcPreview(BaseModel):
+    """Preview of a work sheet expanded into the MLC Bulk Work format: one row
+    per writer, work information on the first row of each work."""
+
+    filename: str
+    total_works: int
+    total_writers: int
+    composers: int
+    lyricists: int
+    # Writers credited as composer AND lyricist of the same work: one row, CA.
+    combined: int = 0
+    source_rows: int
+    # Rows per output sheet: the workbook continues on "Part 2", "Part 3", …
+    # every 300 rows, and a song is never split across two of them.
+    part_rows: list[int] = []
+    columns: list[str]  # the 21 MLC template columns, in order
+    rows: list[dict]  # sample rows, keyed by MLC column
+    mapping: list[MlcMapping]
+    unmapped_columns: list[str]  # source columns the MLC template has no field for
+    checks: list[PrsCheck]
+
+
 # ---- Cleaning / review ----
 class TagGroup(BaseModel):
     tag: str
@@ -402,6 +490,35 @@ class SimilarValuesOut(BaseModel):
     column: str
     value: str  # the value the matches were compared against
     matches: list[SimilarValue]  # most-similar first, capped
+
+
+class SimilarCount(BaseModel):
+    """How many other distinct values of a column resemble one value, at each of
+    the three merge-strictness bands. Counts are cumulative (c90 <= c80 <= c70) and
+    equal exactly what the "find similar" popup would list at ≥90 / ≥80 / ≥70%."""
+
+    value: str
+    c90: int  # distinct near-matches at ≥ 90% similarity
+    c80: int  # ... at ≥ 80%
+    c70: int  # ... at ≥ 70%
+
+
+class SimilarCountsOut(BaseModel):
+    """Per-value near-match counts for a whole column, so the unique-values panel can
+    show a 90/80/70 badge on every row without a request per value.
+
+    Scoring a big name column takes several seconds, so it runs in the background:
+    the first call answers `status="computing"` and the panel polls until
+    `status="ready"`. An entry is returned for EVERY value that was scored,
+    including all-zero ones — a value absent from `counts` was not scored (the
+    panel keeps the ✦ button for it) rather than "scored and has no variants"."""
+
+    column: str
+    # "ready" -> counts below are final | "computing" -> poll again shortly
+    # "skipped" -> too many distinct values to score; never any badges
+    status: Literal["ready", "computing", "skipped"]
+    computed: bool  # kept for older clients: true only when status == "ready"
+    counts: list[SimilarCount]
 
 
 class CleanRowOut(BaseModel):

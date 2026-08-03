@@ -1,7 +1,18 @@
 import enum
 from datetime import datetime
 
-from sqlalchemy import JSON, DateTime, Enum, ForeignKey, Integer, String, Text, func
+from sqlalchemy import (
+    JSON,
+    Boolean,
+    DateTime,
+    Enum,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    func,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .database import Base
@@ -9,6 +20,9 @@ from .database import Base
 
 class UserRole(str, enum.Enum):
     admin = "admin"
+    # Sees, edits and deletes EVERY branch like an admin, but has no access to
+    # user management (can't create/list users or view the activity/audit trail).
+    superuser = "superuser"
     user = "user"
 
 
@@ -147,6 +161,42 @@ class UploadedFile(Base):
     branch: Mapped["Branch"] = relationship(back_populates="files")
 
 
+class SimilarCountsCache(Base):
+    """Persisted 90/80/70 near-match counts for one column of one file.
+
+    These power the badges on the unique-values panel. Computing them is a
+    multi-second scan of a column against itself, so the result is stored here
+    rather than only in the per-process memo: it then survives a container
+    restart or a redeploy, which is what made the badges disappear again after
+    every deployment.
+
+    `values_hash` fingerprints the column's exact value multiset, so a merge or
+    edit INSIDE this column invalidates the row (a fresh scan runs) while an edit
+    anywhere else in the file leaves it valid. One row per (file, column) — the
+    scan is re-run in place when the hash moves on.
+    """
+
+    __tablename__ = "similar_counts_cache"
+    __table_args__ = (UniqueConstraint("file_id", "column_name", name="uq_simcounts_file_col"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    file_id: Mapped[int] = mapped_column(
+        ForeignKey("uploaded_files.id", ondelete="CASCADE"), index=True
+    )
+    column_name: Mapped[str] = mapped_column(String(255))
+    values_hash: Mapped[str] = mapped_column(String(64))
+    # False -> the column has too many distinct values to score (an ID column);
+    # the panel keeps the ✦ button instead of badges. Cached so we don't re-decide.
+    computed: Mapped[bool] = mapped_column(Boolean, default=True)
+    # Compact rows: [[value, c90, c80, c70], ...] for every value that was scored,
+    # INCLUDING all-zero ones — the panel needs "scored, no matches" to be
+    # distinguishable from "not scored" (which falls back to ✦).
+    counts: Mapped[list] = mapped_column(JSON, default=list)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
 class MasterRecord(Base):
     """Legacy committed-record table (JSON blob). Kept for backward compatibility;
     new commits write to the structured `master_data` table instead."""
@@ -277,6 +327,32 @@ class ActivityLog(Base):
     skipped_errors: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
+    )
+
+
+class FileActivity(Base):
+    """Who worked on which file — the admin Activity view.
+
+    Deliberately narrow: it answers "user1 worked on file1.xlsx", nothing about
+    what was done to the file. One row per file a user touches in an area of the
+    app (a branch upload, a standardization run, …). The user's name and email
+    are snapshotted so the trail still reads correctly after an account is
+    renamed or deleted (`user_id` then falls back to NULL).
+    """
+
+    __tablename__ = "file_activity"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    user_name: Mapped[str] = mapped_column(String(255), default="")
+    user_email: Mapped[str] = mapped_column(String(255), default="", index=True)
+    filename: Mapped[str] = mapped_column(String(512), index=True)
+    # Where in the app the file was worked on ("Branch upload", "Reverse PRS", …).
+    area: Mapped[str] = mapped_column(String(64), default="")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), index=True
     )
 
 

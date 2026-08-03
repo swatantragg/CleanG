@@ -131,7 +131,7 @@ export default function Branch() {
           <Link to="/">Branches</Link> <span>/</span>{" "}
           <strong>{branch ? branch.name : "…"}</strong>
         </div>
-        {user?.role === "admin" && branch && (
+        {(user?.role === "admin" || user?.role === "superuser") && branch && (
           <button className="btn sm danger" onClick={() => setShowDelete(true)}>
             <Icon name="trash" size={14} /> Delete branch
           </button>

@@ -8,7 +8,11 @@ const STEP_LABELS = ["Not started", "Uploaded", "Mapped", "Cleaned", "Saved"];
 
 export default function Dashboard() {
   const { user } = useAuth();
-  const isAdmin = user?.role === "admin";
+  // Admins and super users see every branch and may delete any of them; a plain
+  // user only ever sees their own and can't delete branches. (Backend enforces
+  // this too — this just hides the control.)
+  const canManageAllBranches =
+    user?.role === "admin" || user?.role === "superuser";
   const [branches, setBranches] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -230,7 +234,7 @@ export default function Dashboard() {
                   </div>
                   <div className="branch-card-actions">
                     <span className={`status-pill ${b.status}`}>{b.status}</span>
-                    {isAdmin && (
+                    {canManageAllBranches && (
                       <button
                         className="branch-del"
                         title="Delete branch"

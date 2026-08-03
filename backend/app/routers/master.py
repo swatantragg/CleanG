@@ -20,7 +20,7 @@ from ..core.presets import (
     preset_payload,
 )
 from ..database import get_db
-from ..deps import get_current_user
+from ..deps import can_access_all_branches, get_current_user
 from ..models import (
     MASTER_COLUMN_TO_ATTR,
     ActivityLog,
@@ -28,7 +28,6 @@ from ..models import (
     MasterColumn,
     MasterData,
     User,
-    UserRole,
 )
 from ..schemas import (
     ActivityLogOut,
@@ -73,11 +72,11 @@ def _value_match(key: str, value: str):
 def _scope(stmt, user: User):
     """Restrict a MasterData query to the records a user may see.
 
-    Admins see every committed record; a regular user only sees records whose
-    owning branch belongs to them. Without this, any authenticated user could
-    read/export the entire master dataset across all tenants.
+    Admins and super users see every committed record; a regular user only sees
+    records whose owning branch belongs to them. Without this, any authenticated
+    user could read/export the entire master dataset across all tenants.
     """
-    if user.role != UserRole.admin:
+    if not can_access_all_branches(user):
         owned = select(Branch.id).where(Branch.owner_id == user.id)
         stmt = stmt.where(MasterData.branch_id.in_(owned))
     return stmt
@@ -392,10 +391,10 @@ def activity_log(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    """Per-branch audit of every save into the master dataset. Admins see all;
-    regular users see only activity from their own branches."""
+    """Per-branch audit of every save into the master dataset. Admins and super
+    users see all; regular users see only activity from their own branches."""
     stmt = select(ActivityLog).order_by(ActivityLog.created_at.desc()).limit(limit)
-    if user.role != UserRole.admin:
+    if not can_access_all_branches(user):
         owned = select(Branch.id).where(Branch.owner_id == user.id)
         stmt = stmt.where(ActivityLog.branch_id.in_(owned))
     return db.scalars(stmt).all()

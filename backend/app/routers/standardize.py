@@ -20,8 +20,10 @@ from fastapi import (
     status,
 )
 from openpyxl import Workbook
+from sqlalchemy.orm import Session
 
 from ..config import get_settings
+from ..core.activity import log_file_activity
 from ..core.excel import MAX_BYTES
 from ..core.http import content_disposition
 from ..core.limiter import limiter
@@ -31,6 +33,7 @@ from ..core.standardize import (
     mapping_summary,
     standardize,
 )
+from ..database import get_db
 from ..deps import get_current_user
 from ..models import User
 from ..schemas import StandardizeMapping, StandardizePreview
@@ -65,7 +68,8 @@ async def _read_table(file: UploadFile) -> tuple[str, list, list]:
 async def preview(
     request: Request,
     file: UploadFile = File(...),
-    _user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
 ):
     """Standardize the upload and return the column mapping plus a sample of the
     master-formatted rows, so the user can confirm the allocation before
@@ -73,6 +77,7 @@ async def preview(
     name, headers, rows = await _read_table(file)
     result = standardize(headers, rows)
     summary = mapping_summary(result["mapping"])
+    log_file_activity(db, user, name, "Master format")
     return StandardizePreview(
         columns=result["columns"],
         mapping=[StandardizeMapping(**m) for m in summary],
@@ -88,12 +93,14 @@ async def preview(
 async def download(
     request: Request,
     file: UploadFile = File(...),
-    _user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
 ):
     """Standardize the upload and stream the full result as an .xlsx workbook in
     the master format."""
     name, headers, rows = await _read_table(file)
     result = standardize(headers, rows)
+    log_file_activity(db, user, name, "Master format")
     columns = result["columns"]
 
     wb = Workbook(write_only=True)

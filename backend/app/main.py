@@ -17,7 +17,18 @@ from .core.limiter import limiter
 from .core.scheduler import shutdown_scheduler, start_scheduler
 from .database import Base, SessionLocal, engine
 from .models import MasterColumn, User, UserRole
-from .routers import auth, branches, clean, files, master, reports, standardize, users
+from .routers import (
+    auth,
+    branches,
+    clean,
+    files,
+    master,
+    mlc,
+    prs,
+    reports,
+    standardize,
+    users,
+)
 from .security import hash_password
 
 settings = get_settings()
@@ -48,6 +59,16 @@ def _migrate(db) -> None:
     `corrections`/`dropped` columns are added here for databases created before
     cleaning moved fully in-memory.
     """
+    # Add the 'superuser' value to the Postgres user_role enum for databases created
+    # before the role existed. ALTER TYPE ... ADD VALUE can't run inside a normal
+    # transaction on older Postgres, so use an autocommit connection; IF NOT EXISTS
+    # makes it a no-op once applied (and on fresh DBs where create_all already made
+    # the type with all current values).
+    if engine.dialect.name == "postgresql":
+        with engine.connect() as conn:
+            conn.execution_options(isolation_level="AUTOCOMMIT").execute(
+                text("ALTER TYPE user_role ADD VALUE IF NOT EXISTS 'superuser'")
+            )
     db.execute(text(
         "ALTER TABLE uploaded_files "
         "ADD COLUMN IF NOT EXISTS corrections JSONB NOT NULL DEFAULT '{}'::jsonb"
@@ -335,6 +356,8 @@ app.include_router(master.router)
 app.include_router(files.router)
 app.include_router(clean.router)
 app.include_router(standardize.router)
+app.include_router(prs.router)
+app.include_router(mlc.router)
 app.include_router(reports.router)
 
 

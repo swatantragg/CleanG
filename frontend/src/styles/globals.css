@@ -3063,6 +3063,46 @@ input::placeholder {
   color: var(--muted-2);
   font-size: 0.7rem;
 }
+/* Blank-cell count next to the unique badge — a filter button in its own right. */
+.th-blank {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  margin-left: 0.35rem;
+  height: 18px;
+  padding: 0 6px;
+  border-radius: 999px;
+  border: 1px dashed var(--border-strong);
+  background: none;
+  color: var(--muted);
+  font: inherit;
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0;
+  cursor: pointer;
+}
+.th-blank:hover {
+  color: var(--text);
+  border-color: var(--brand);
+}
+.th-blank.active {
+  border-style: solid;
+  border-color: var(--brand);
+  background: color-mix(in srgb, var(--brand) 14%, var(--surface));
+  color: var(--brand);
+}
+/* The "empty cell" marker, same language as the grid legend. */
+.blank-dot {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  border-radius: 3px;
+  background: var(--surface-2);
+  border: 1px solid var(--border-strong);
+}
+.th-blank.active .blank-dot {
+  border-color: var(--brand);
+}
 .grid-table th.col-editing {
   background: color-mix(in srgb, var(--brand) 12%, var(--surface));
   color: var(--brand);
@@ -3233,6 +3273,17 @@ input::placeholder {
 }
 .filter-sort select {
   flex: 1;
+  padding: 0.5rem 0.6rem;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+}
+/* Column picker under the "blank cells" checkbox — only shown once it's ticked. */
+.filter-blank-col {
+  width: 100%;
+  margin-top: 0.4rem;
   padding: 0.5rem 0.6rem;
   border: 1px solid var(--border-strong);
   border-radius: 8px;
@@ -3509,6 +3560,79 @@ body.x-resizing {
   color: var(--brand);
   border-color: var(--brand);
 }
+/* While the column's 90/80/70 scan is still running, every row shows ✦ — dim it
+   slightly so it reads as "not the final state", but keep it fully clickable
+   (the per-value "find similar" popup works without the badges). */
+.unique-similar-btn.pending {
+  opacity: 0.45;
+}
+.unique-similar-btn.pending:hover {
+  opacity: 1;
+}
+/* "finding near-matches…" note next to the value count while the scan runs. */
+.sim-pending {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  margin-left: 0.5rem;
+  color: var(--brand);
+}
+.sim-pending-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  animation: sim-pending-pulse 1.2s ease-in-out infinite;
+}
+@keyframes sim-pending-pulse {
+  0%, 100% { opacity: 0.25; }
+  50% { opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .sim-pending-dot { animation: none; opacity: 0.7; }
+}
+/* 90/80/70 near-match badges on each normal-mode row. Non-zero badges are clickable
+   (open "find similar" at that band); zeros are dim, inert markers. */
+.unique-simcounts {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.2rem;
+}
+.sim-badge {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.15rem;
+  min-width: 30px;
+  justify-content: center;
+  padding: 0.05rem 0.32rem;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.5;
+}
+.sim-badge .sim-pct {
+  font-size: 0.6rem;
+  font-weight: 700;
+  opacity: 0.7;
+}
+.sim-badge.has {
+  cursor: pointer;
+  color: var(--brand);
+  background: color-mix(in srgb, var(--brand) 14%, var(--surface));
+  border-color: color-mix(in srgb, var(--brand) 30%, transparent);
+}
+.sim-badge.has:hover {
+  background: color-mix(in srgb, var(--brand) 26%, var(--surface));
+  border-color: var(--brand);
+}
+.sim-badge.zero {
+  color: var(--muted);
+  opacity: 0.4;
+  cursor: default;
+}
 /* Similarity % badge in "find similar" mode. */
 .unique-ratio {
   flex: none;
@@ -3544,6 +3668,19 @@ body.x-resizing {
   background: var(--surface);
   cursor: pointer;
 }
+.similar-count {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  padding: 0.1rem 0.5rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  line-height: 1.4;
+  color: var(--text);
+  background: var(--surface-alt, var(--surface));
+  white-space: nowrap;
+}
 .unique-foot {
   display: flex;
   align-items: center;
@@ -3562,6 +3699,17 @@ body.x-resizing {
 }
 .unique-row.picked {
   background: color-mix(in srgb, var(--brand) 12%, var(--surface));
+}
+/* Pinned "(blank)" row at the top of the values list. */
+.unique-row.blank-row {
+  border-bottom: 1px dashed var(--border);
+  border-radius: 8px 8px 0 0;
+  font-style: italic;
+}
+.unique-row.blank-row .unique-val {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
 }
 .unique-row .row-check {
   flex: none;
@@ -3988,4 +4136,87 @@ body.x-resizing {
 .preview-table thead .preview-idx {
   z-index: 2;
   background: var(--brand-50);
+}
+
+/* ---------- PRS standardization tab ---------- */
+/* The section tabs carry an icon, so lay the label out beside it. */
+.view-tabs button {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.prs-panels {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 1rem;
+  margin-top: 1rem;
+  align-items: start;
+}
+@media (max-width: 1000px) {
+  .prs-panels {
+    grid-template-columns: 1fr;
+  }
+}
+.prs-panels .table {
+  margin-top: 0.6rem;
+}
+.prs-panels .table th,
+.prs-panels .table td {
+  padding: 0.5rem 0.7rem;
+}
+
+.prs-ok,
+.prs-fail {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  margin-left: 0.5rem;
+  font-size: 0.78rem;
+  font-weight: 600;
+  padding: 0.15rem 0.5rem;
+  border-radius: 999px;
+}
+.prs-ok {
+  color: var(--green);
+  background: color-mix(in srgb, var(--green) 12%, transparent);
+}
+.prs-fail {
+  color: var(--red);
+  background: color-mix(in srgb, var(--red) 12%, transparent);
+}
+
+.prs-checks {
+  list-style: none;
+  margin: 0.7rem 0 0;
+  padding: 0;
+  display: grid;
+  gap: 0.4rem;
+}
+.prs-checks li {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+  font-size: 0.88rem;
+  line-height: 1.35;
+  padding-bottom: 0.4rem;
+  border-bottom: 1px dashed var(--border);
+}
+.prs-checks li:last-child {
+  border-bottom: none;
+  padding-bottom: 0;
+}
+.prs-checks li .icon {
+  flex: none;
+  margin-top: 0.15rem;
+}
+.prs-checks li.ok .icon {
+  color: var(--green);
+}
+.prs-checks li.bad .icon {
+  color: var(--red);
+}
+.prs-checks li em {
+  color: var(--muted);
+  font-style: normal;
 }

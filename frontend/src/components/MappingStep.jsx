@@ -129,6 +129,7 @@ export default function MappingStep({ file, onSaved, onNext }) {
   // REAL master_data column and wires it into this file's mapping. `name` is the
   // (optionally edited) master column name confirmed in the dialog.
   async function addToMaster(header, name) {
+    if (adding) return;   // a second trigger (keystroke on top of a click) is a no-op
     setError("");
     setAdding(header);
     try {
@@ -429,6 +430,14 @@ export default function MappingStep({ file, onSaved, onNext }) {
                 setPendingCol((p) => ({ ...p, name: e.target.value }))
               }
               placeholder="Master column name"
+              onKeyDown={(e) => {
+                // Enter confirms the dialog, Escape closes it.
+                if (e.key === "Enter" && !adding && pendingCol.name.trim()) {
+                  e.preventDefault();
+                  addToMaster(pendingCol.header, pendingCol.name);
+                }
+                if (e.key === "Escape" && !adding) setPendingCol(null);
+              }}
               autoFocus
             />
             <div className="confirm-actions">

@@ -16,6 +16,10 @@ const UNIQUE_W_KEY = "cleang.uniquePanelWidth";
 const UNIQUE_W_DEFAULT = 380;
 const UNIQUE_W_MIN = 300;
 
+// The 90/80/70 near-match scan runs on the server in the background (seconds on a
+// big name column), so the panel polls this often until the counts land.
+const SIMILAR_COUNTS_POLL_MS = 2000;
+
 // Never wider than the viewport (minus a sliver of overlay to click away on).
 function clampUniqueWidth(w) {
   const max = Math.max(UNIQUE_W_MIN, window.innerWidth - 56);
@@ -140,10 +144,14 @@ export default function ReviewStep({ file, onCommitted }) {
   // Values match ANY within a column (OR); columns are AND'd together, so
   // UPC "256" and Label "svf" narrow the grid at the same time.
   const [valueFilters, setValueFilters] = useState({});
+  // Blank-cell filter: "" (off), "*" (a blank anywhere in the row), or a column
+  // name (blank in that one column).
+  const [blankFilter, setBlankFilter] = useState("");
   // Draft selections inside the open filter modal (committed on "Apply filter").
   const [draftTags, setDraftTags] = useState([]);
   const [draftSortCol, setDraftSortCol] = useState("");
   const [draftSortDir, setDraftSortDir] = useState("asc");
+  const [draftBlank, setDraftBlank] = useState("");
 
   // --- Fill a column with a constant value (empties only) ---
   const [showFill, setShowFill] = useState(false);
@@ -165,6 +173,17 @@ export default function ReviewStep({ file, onCommitted }) {
   const [uniqueSearch, setUniqueSearch] = useState(""); // what the user is typing
   const [uniqueSearchQ, setUniqueSearchQ] = useState(""); // debounced, sent to server
   const [uniqueNonce, setUniqueNonce] = useState(0); // bump to force a re-fetch
+  // Per-value near-match counts for the whole column: value -> {c90,c80,c70}.
+  // Powers the 90/80/70 badges on each row so variants are visible without opening
+  // every value. Every value the server SCORED is present, zeros included — a value
+  // missing from this map wasn't scored, so its row keeps the ✦ button.
+  const [similarCounts, setSimilarCounts] = useState({});
+  // "loading"    — first request in flight
+  // "computing"  — server is scanning the column in the background; we poll
+  // "ready"      — counts below are final
+  // "skip"       — high-cardinality column the scan sits out (or the request failed);
+  //                every row falls back to the ✦ button.
+  const [similarCountsMode, setSimilarCountsMode] = useState("loading");
   const [uniqueSortKey, setUniqueSortKey] = useState("count"); // count | value
   const [uniqueSortDir, setUniqueSortDir] = useState("desc"); // asc | desc
   // Panel width is user-draggable (long names get truncated at the default
@@ -175,6 +194,10 @@ export default function ReviewStep({ file, onCommitted }) {
   // it instead of back at the top of a long list.
   const lastPickRef = useRef({});
   const scrollToRef = useRef(null); // value to scroll to once the list renders
+  // Value to jump back to when leaving "find similar" mode (Cancel/back), so the
+  // reviewer lands on the name they clicked rather than the top of the list.
+  const similarResumeRef = useRef(null);
+  const savingRef = useRef(new Set()); // row indexes with a save in flight
 
   // --- Tab-wide grid search (works in every view tab) ---
   const [search, setSearch] = useState(""); // what the user is typing
@@ -274,6 +297,16 @@ export default function ReviewStep({ file, onCommitted }) {
     return m;
   }, [profile]);
 
+  // Per-column blank counts, so the blank-cell filter can say how many rows each
+  // column would bring back before the user picks it.
+  const blankByCol = useMemo(() => {
+    const m = {};
+    (profile?.columns || []).forEach((p) => {
+      m[p.name] = p.blank;
+    });
+    return m;
+  }, [profile]);
+
   // "All" has no page size of its own — ask for more rows than any file holds.
   const apiPageSize = effectivePageSize(pageSize);
   const pages = Math.max(1, Math.ceil(total / apiPageSize));
@@ -299,9 +332,21 @@ export default function ReviewStep({ file, onCommitted }) {
         qs.set("filters", JSON.stringify(valueFilters));
       }
       if (searchQ) qs.set("q", searchQ);
+      if (blankFilter) qs.set("blanks", blankFilter);
       return qs.toString();
     },
-    [view, page, apiPageSize, activeTag, activeTags, sortCol, sortDir, valueFilters, searchQ]
+    [
+      view,
+      page,
+      apiPageSize,
+      activeTag,
+      activeTags,
+      sortCol,
+      sortDir,
+      valueFilters,
+      searchQ,
+      blankFilter,
+    ]
   );
 
   const applyPayload = useCallback((d) => {
@@ -410,6 +455,78 @@ export default function ReviewStep({ file, onCommitted }) {
       row.offsetTop - list.clientHeight / 2 + row.offsetHeight / 2
     );
   }, [uniqueCol, uniqueValues]);
+
+  // Near-match counts for every value in the open column, for the 90/80/70 badges.
+  // Column-wide (not affected by the in-panel search), so it's keyed only on the
+  // column and the post-merge nonce.
+  //
+  // Scanning a big name column takes several seconds, so the server runs it on a
+  // worker thread and caches the result in the database (it therefore survives a
+  // restart or a redeploy). It answers "computing" until the scan lands, so we poll
+  // — the panel stays fully usable meanwhile, with the ✦ button on every row. A
+  // cancel flag drops a stale response/timer after switching columns.
+  useEffect(() => {
+    if (!uniqueCol) {
+      setSimilarCounts({});
+      setSimilarCountsMode("loading");
+      return;
+    }
+    let cancelled = false;
+    let timer = null;
+    setSimilarCounts({});
+    setSimilarCountsMode("loading");
+    const poll = async () => {
+      try {
+        const d = await api(
+          `/api/files/${file.id}/columns/similar-counts?column=${encodeURIComponent(
+            uniqueCol
+          )}`
+        );
+        if (cancelled) return;
+        // `status` is the current contract; `computed` keeps an older API working.
+        const status = d.status || (d.computed ? "ready" : "skipped");
+        if (status === "computing") {
+          setSimilarCountsMode("computing");
+          timer = setTimeout(poll, SIMILAR_COUNTS_POLL_MS);
+          return;
+        }
+        const map = {};
+        for (const c of d.counts || [])
+          map[c.value] = { c90: c.c90, c80: c.c80, c70: c.c70 };
+        setSimilarCounts(map);
+        setSimilarCountsMode(status === "ready" ? "ready" : "skip");
+      } catch {
+        // Non-fatal: the panel is fully usable without badges (the ✦/find-similar
+        // flow still works), so a failure just falls back to the ✦ button.
+        if (!cancelled) {
+          setSimilarCounts({});
+          setSimilarCountsMode("skip");
+        }
+      }
+    };
+    poll();
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [uniqueCol, uniqueNonce, file.id]);
+
+  // Leaving "find similar" mode (Cancel/back, no merge applied) drops the reviewer
+  // back on the value they clicked into, not the top of the list. The full list is
+  // already in the DOM when similarBase clears, so this runs right after that commit.
+  useEffect(() => {
+    if (similarBase || !similarResumeRef.current) return;
+    const target = similarResumeRef.current;
+    similarResumeRef.current = null;
+    const list = uniqueListRef.current;
+    if (!list) return;
+    const row = list.querySelector(`[data-uval="${CSS.escape(String(target))}"]`);
+    if (!row) return;
+    list.scrollTop = Math.max(
+      0,
+      row.offsetTop - list.clientHeight / 2 + row.offsetHeight / 2
+    );
+  }, [similarBase]);
 
   // A window resize can leave a remembered width wider than the viewport.
   useEffect(() => {
@@ -565,7 +682,11 @@ export default function ReviewStep({ file, onCommitted }) {
 
   async function saveRow(row) {
     const values = drafts[row.row_index];
-    if (!values) return;
+    // `pendingRows` is React state, so it hasn't updated yet when two triggers
+    // land in the same tick (a fast double Enter). The ref is the real in-flight
+    // set and keeps the second one from sending a duplicate PUT.
+    if (!values || savingRef.current.has(row.row_index)) return;
+    savingRef.current.add(row.row_index);
     markPending(row.row_index, true);
     setError("");
     try {
@@ -582,6 +703,7 @@ export default function ReviewStep({ file, onCommitted }) {
     } catch (err) {
       setError(err.message);
     } finally {
+      savingRef.current.delete(row.row_index);
       markPending(row.row_index, false);
     }
   }
@@ -621,12 +743,41 @@ export default function ReviewStep({ file, onCommitted }) {
     setDrafts({});
   }
 
+  function discardRowDraft(rowIndex) {
+    setDrafts((d) => {
+      const n = { ...d };
+      delete n[rowIndex];
+      return n;
+    });
+  }
+
+  // Enter applies the row you're typing in (same as its ✓ button), Escape throws
+  // that row's edits away — so an edit can be committed from the keyboard without
+  // reaching for the mouse. Shift+Enter is left alone for anyone used to it
+  // meaning "newline".
+  function cellKeyDown(event, row) {
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      event.currentTarget.blur();
+      if (drafts[row.row_index] && !pendingRows.has(row.row_index) && !busy) {
+        saveRow(row);
+      }
+      return;
+    }
+    if (event.key === "Escape") {
+      event.preventDefault();
+      event.currentTarget.blur();
+      discardRowDraft(row.row_index);
+    }
+  }
+
   // --- Filters ---------------------------------------------------------------
   function openFilters() {
     // Seed the modal with whatever's currently applied so it reflects reality.
     setDraftTags(activeTags);
     setDraftSortCol(sortCol);
     setDraftSortDir(sortDir);
+    setDraftBlank(blankFilter);
     setShowFilters(true);
   }
 
@@ -640,6 +791,7 @@ export default function ReviewStep({ file, onCommitted }) {
     setActiveTags(draftTags);
     setSortCol(draftSortCol);
     setSortDir(draftSortDir);
+    setBlankFilter(draftBlank);
     setPage(0);
     setShowFilters(false);
   }
@@ -648,9 +800,25 @@ export default function ReviewStep({ file, onCommitted }) {
     setActiveTags([]);
     setSortCol("");
     setSortDir("asc");
+    setBlankFilter("");
     setDraftTags([]);
     setDraftSortCol("");
     setDraftSortDir("asc");
+    setDraftBlank("");
+    setPage(0);
+  }
+
+  // The blank filter is one checkbox plus a column picker: ticking it defaults to
+  // "any column", unticking clears the column too.
+  function toggleDraftBlank() {
+    setDraftBlank((b) => (b ? "" : "*"));
+  }
+
+  // Show only the rows whose cell in this column is empty (click the same count
+  // again to drop the filter). Used by the header badge and the unique panel.
+  function toggleBlankColumn(col) {
+    setHeaderMenuCol(null);
+    setBlankFilter((b) => (b === col ? "" : col));
     setPage(0);
   }
 
@@ -873,12 +1041,17 @@ export default function ReviewStep({ file, onCommitted }) {
     }
   }
 
-  function findSimilar(value) {
+  // Open "find similar" for a value. `ratio` lets a clicked 90/80/70 badge open the
+  // flow at that exact strictness; it defaults to the current dropdown setting (the
+  // ✦ button). The clicked value is remembered so Cancel/back returns to it.
+  function findSimilar(value, ratio = similarRatio) {
+    similarResumeRef.current = value;
     setMergeMode(true);
     setMergeConfirm(null);
     setSimilarBase(value);
+    setSimilarRatio(ratio);
     setMergeTarget(value); // the clicked value is the canonical keeper by default
-    loadSimilar(value, similarRatio);
+    loadSimilar(value, ratio);
   }
 
   // Re-run the similarity search when the reviewer loosens/tightens the strictness.
@@ -891,7 +1064,9 @@ export default function ReviewStep({ file, onCommitted }) {
   async function requestMerge() {
     const from = [...mergePicked];
     const to = mergeTarget.trim();
-    if (from.length === 0 || !to) return;
+    // Re-entry guard: a second trigger (a keystroke on top of a click) must not
+    // start a parallel run whose `finally` clears the busy flag under the first.
+    if (from.length === 0 || !to || mergeBusy) return;
     setMergeBusy(true);
     setError("");
     try {
@@ -910,7 +1085,7 @@ export default function ReviewStep({ file, onCommitted }) {
   // Step 2: apply the confirmed merge — rewrites all matching cells, returns the
   // refreshed grid, then reloads the unique list.
   async function confirmMerge() {
-    if (!mergeConfirm) return;
+    if (!mergeConfirm || mergeBusy) return;
     const col = uniqueCol;
     setMergeBusy(true);
     setError("");
@@ -923,6 +1098,11 @@ export default function ReviewStep({ file, onCommitted }) {
         }
       );
       applyPayload(d);
+      // Land back on the canonical value once the refreshed list arrives (it
+      // survives the merge); the reload's own scroll effect owns this, so hand the
+      // in-mode resume ref off to it to avoid a double jump.
+      similarResumeRef.current = null;
+      scrollToRef.current = mergeConfirm.to;
       resetMerge();
       setUniqueNonce((n) => n + 1); // re-fetch the unique list (variant is gone now)
     } catch (err) {
@@ -1177,6 +1357,8 @@ export default function ReviewStep({ file, onCommitted }) {
       parts.push(`${col}_${vals.join("_")}`)
     );
     if (searchQ) parts.push(`search_${searchQ}`);
+    if (blankFilter)
+      parts.push(blankFilter === "*" ? "blank_cells" : `blank_${blankFilter}`);
     const descriptor = parts.map(slug).filter(Boolean).join("_");
     const base =
       slug((file.original_name || "file").replace(/\.[^.]+$/, "")) || "file";
@@ -1202,6 +1384,7 @@ export default function ReviewStep({ file, onCommitted }) {
         qs.set("filters", JSON.stringify(valueFilters));
       }
       if (searchQ) qs.set("q", searchQ);
+      if (blankFilter) qs.set("blanks", blankFilter);
       await download(`/api/files/${file.id}/export?${qs.toString()}`, name);
     } catch (err) {
       setError(err.message);
@@ -1405,8 +1588,10 @@ export default function ReviewStep({ file, onCommitted }) {
           <button className="btn sm filter-btn" onClick={openFilters}>
             <Icon name="filter" size={14} />
             Filters
-            {(activeTags.length > 0 || sortCol) && (
-              <span className="filter-n">{activeTags.length + (sortCol ? 1 : 0)}</span>
+            {(activeTags.length > 0 || sortCol || blankFilter) && (
+              <span className="filter-n">
+                {activeTags.length + (sortCol ? 1 : 0) + (blankFilter ? 1 : 0)}
+              </span>
             )}
           </button>
           <button
@@ -1511,7 +1696,11 @@ export default function ReviewStep({ file, onCommitted }) {
       )}
 
       {/* Active-filter chips — what's currently applied via the Filters popup */}
-      {(activeTags.length > 0 || sortCol || Object.keys(valueFilters).length > 0 || searchQ) && (
+      {(activeTags.length > 0 ||
+        sortCol ||
+        blankFilter ||
+        Object.keys(valueFilters).length > 0 ||
+        searchQ) && (
         <div className="review-toolbar">
           <div className="active-filters">
             {searchQ && (
@@ -1541,6 +1730,22 @@ export default function ReviewStep({ file, onCommitted }) {
                     setPage(0);
                   }}
                   title="Remove sort"
+                >
+                  <Icon name="x" size={11} />
+                </button>
+              </span>
+            )}
+            {blankFilter && (
+              <span className="filter-chip">
+                <Icon name="table" size={12} />
+                Blank cells ·{" "}
+                {blankFilter === "*" ? "any column" : blankFilter}
+                <button
+                  onClick={() => {
+                    setBlankFilter("");
+                    setPage(0);
+                  }}
+                  title="Remove the blank-cell filter"
                 >
                   <Icon name="x" size={11} />
                 </button>
@@ -1659,6 +1864,20 @@ export default function ReviewStep({ file, onCommitted }) {
                       )}
                       <span className="th-caret">▾</span>
                     </button>
+                    {/* Blank-cell count for this column — click to see just those
+                        rows. Sits outside .th-label so it stays its own button. */}
+                    {blankByCol[c] > 0 && (
+                      <button
+                        className={`th-blank${blankFilter === c ? " active" : ""}`}
+                        onClick={() => toggleBlankColumn(c)}
+                        title={`${blankByCol[c]} row${
+                          blankByCol[c] === 1 ? "" : "s"
+                        } have ${c} empty — click to show only those rows`}
+                      >
+                        <span className="blank-dot" />
+                        {blankByCol[c]}
+                      </button>
+                    )}
                   </div>
                 </th>
               ))}
@@ -1788,6 +2007,7 @@ export default function ReviewStep({ file, onCommitted }) {
                                 onChange={(e) =>
                                   setDraft(row.row_index, c, e.target.value)
                                 }
+                                onKeyDown={(e) => cellKeyDown(e, row)}
                               />
                             </td>
                           );
@@ -1808,6 +2028,7 @@ export default function ReviewStep({ file, onCommitted }) {
                                 <input
                                   value={val}
                                   onChange={(e) => setDraft(row.row_index, c, e.target.value)}
+                                  onKeyDown={(e) => cellKeyDown(e, row)}
                                 />
                               )}
                               <span className="cell-tag">
@@ -2079,6 +2300,35 @@ export default function ReviewStep({ file, onCommitted }) {
               )}
             </div>
 
+            {/* Empty cells — the quickest way to find what still needs filling in */}
+            <div className="filter-section">
+              <label className="filter-section-label">Empty cells</label>
+              <label className="filter-check">
+                <input
+                  type="checkbox"
+                  checked={!!draftBlank}
+                  onChange={toggleDraftBlank}
+                />
+                Show only rows with blank cells
+              </label>
+              {draftBlank && (
+                <select
+                  className="filter-blank-col"
+                  value={draftBlank}
+                  onChange={(e) => setDraftBlank(e.target.value)}
+                  title="Blank anywhere in the row, or blank in one specific column"
+                >
+                  <option value="*">Blank in any column</option>
+                  {columns.map((c) => (
+                    <option key={c} value={c}>
+                      Blank in “{c}”
+                      {blankByCol[c] != null ? ` (${blankByCol[c]})` : ""}
+                    </option>
+                  ))}
+                </select>
+              )}
+            </div>
+
             <div className="filter-section">
               <label className="filter-section-label">Sort rows</label>
               <div className="filter-sort">
@@ -2148,6 +2398,11 @@ export default function ReviewStep({ file, onCommitted }) {
                 placeholder="e.g. Artium | Goongoonalo  or  50 | 50"
                 value={fillVal}
                 onChange={(e) => setFillVal(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key !== "Enter" || fillBusy || !fillCol) return;
+                  e.preventDefault();
+                  applyFill();
+                }}
                 autoFocus
               />
               <p className="muted small" style={{ marginTop: "0.5rem" }}>
@@ -2308,6 +2563,14 @@ export default function ReviewStep({ file, onCommitted }) {
             <div className="unique-sortbar">
               <span className="muted small">
                 {uniqueValues.length} value{uniqueValues.length === 1 ? "" : "s"}
+                {/* The near-match scan runs server-side and can take a few
+                    seconds on a big name column; say so rather than leaving the
+                    ✦ buttons looking like the final state. */}
+                {similarCountsMode === "computing" && (
+                  <span className="sim-pending" title="Counting 90/80/70 near-matches for this column">
+                    <span className="sim-pending-dot" /> finding near-matches…
+                  </span>
+                )}
               </span>
               <div className="unique-sort-opts">
                 <span className="muted small">Sort by</span>
@@ -2369,11 +2632,49 @@ export default function ReviewStep({ file, onCommitted }) {
                       <option value={0.8}>≥ 80%</option>
                       <option value={0.7}>≥ 70% (loose)</option>
                     </select>
+                    <span
+                      className="similar-count"
+                      title="Close matches found at this similarity"
+                    >
+                      {similarLoading
+                        ? "…"
+                        : `${similarMatches.length} ${
+                            similarMatches.length === 1 ? "match" : "matches"
+                          }`}
+                    </span>
                   </label>
                 </div>
               )}
             </div>
             <div className="unique-list" ref={uniqueListRef}>
+              {/* Blank cells aren't a "value", so they never appear in the list —
+                  pin them at the top with their own count and filter. */}
+              {!mergeMode &&
+                !similarBase &&
+                !uniqueSearch.trim() &&
+                blankByCol[uniqueCol] > 0 && (
+                <div
+                  className={`unique-row blank-row${
+                    blankFilter === uniqueCol ? " active" : ""
+                  }`}
+                >
+                  <label
+                    className="unique-pick"
+                    title={`Show only the rows whose ${uniqueCol} is empty`}
+                  >
+                    <input
+                      type="checkbox"
+                      className="row-check"
+                      checked={blankFilter === uniqueCol}
+                      onChange={() => toggleBlankColumn(uniqueCol)}
+                    />
+                    <span className="unique-val">
+                      <span className="blank-dot" /> (blank)
+                    </span>
+                  </label>
+                  <span className="unique-count">{blankByCol[uniqueCol]}</span>
+                </div>
+              )}
               {similarBase ? (
                 // "Find similar" mode: show only the close matches (checkboxes),
                 // most-similar first, each with its similarity %.
@@ -2480,13 +2781,59 @@ export default function ReviewStep({ file, onCommitted }) {
                             {u.value}
                           </span>
                         </label>
-                        <button
-                          className="unique-similar-btn"
-                          onClick={() => findSimilar(u.value)}
-                          title={`Find & merge values similar to “${u.value}”`}
-                        >
-                          <Icon name="sparkles" size={13} />
-                        </button>
+                        {similarCounts[u.value] ? (
+                          // 90/80/70 near-match counts. Cumulative (c90≤c80≤c70), and
+                          // each equals what the popup lists at that strictness. A
+                          // non-zero badge opens "find similar" pre-set to its band;
+                          // a zero is a dim, non-interactive marker. Values the scan
+                          // didn't reach have no entry at all and keep the ✦ button —
+                          // showing them "0" would be a lie.
+                          <span
+                            className="unique-simcounts"
+                            title={`Names similar to “${u.value}” (≥90 / ≥80 / ≥70%). Click a count to review & merge.`}
+                          >
+                            {[
+                              [90, 0.9, similarCounts[u.value].c90 || 0],
+                              [80, 0.8, similarCounts[u.value].c80 || 0],
+                              [70, 0.7, similarCounts[u.value].c70 || 0],
+                            ].map(([pct, ratio, n]) =>
+                              n > 0 ? (
+                                <button
+                                  key={pct}
+                                  type="button"
+                                  className="sim-badge has"
+                                  onClick={() => findSimilar(u.value, ratio)}
+                                  title={`${n} name${n === 1 ? "" : "s"} within ${pct}% of “${u.value}” — click to review & merge`}
+                                >
+                                  <span className="sim-pct">{pct}</span>
+                                  {n}
+                                </button>
+                              ) : (
+                                <span
+                                  key={pct}
+                                  className="sim-badge zero"
+                                  title={`No names within ${pct}% of “${u.value}”`}
+                                >
+                                  <span className="sim-pct">{pct}</span>0
+                                </span>
+                              )
+                            )}
+                          </span>
+                        ) : (
+                          <button
+                            className={`unique-similar-btn${
+                              similarCountsMode === "computing" ? " pending" : ""
+                            }`}
+                            onClick={() => findSimilar(u.value)}
+                            title={
+                              similarCountsMode === "computing"
+                                ? `Counting near-matches for this column… — click to find & merge values similar to “${u.value}” now`
+                                : `Find & merge values similar to “${u.value}”`
+                            }
+                          >
+                            <Icon name="sparkles" size={13} />
+                          </button>
+                        )}
                         <span className="unique-count">{u.count}</span>
                       </div>
                     );
@@ -2509,6 +2856,15 @@ export default function ReviewStep({ file, onCommitted }) {
                   placeholder="correct value (e.g. Shreya Ghoshal)"
                   value={mergeTarget}
                   onChange={(e) => setMergeTarget(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key !== "Enter") return;
+                    e.preventDefault();
+                    // Once the confirm dialog is up it owns the Enter key —
+                    // otherwise this input (which keeps focus behind the dialog)
+                    // would re-run the preview instead of applying the merge.
+                    if (mergeConfirm || mergeBusy) return;
+                    if (mergePicked.size > 0 && mergeTarget.trim()) requestMerge();
+                  }}
                 />
                 <button
                   className="btn primary sm"
@@ -2539,7 +2895,19 @@ export default function ReviewStep({ file, onCommitted }) {
 
       {/* Merge confirmation — shows the blast radius before any cell changes */}
       {mergeConfirm && (
-        <div className="save-overlay" onClick={() => !mergeBusy && setMergeConfirm(null)}>
+        <div
+          className="save-overlay"
+          onClick={() => !mergeBusy && setMergeConfirm(null)}
+          // The dialog owns the keyboard while it's open. Its Merge button is
+          // focused on open, so Enter activates that button natively (handling it
+          // here as well would fire the merge twice); Escape backs out.
+          onKeyDown={(e) => {
+            if (e.key === "Escape" && !mergeBusy) {
+              e.preventDefault();
+              setMergeConfirm(null);
+            }
+          }}
+        >
           <div className="confirm-modal" onClick={(e) => e.stopPropagation()}>
             <div className="confirm-spark">
               <Icon name="check" size={22} />
@@ -2573,6 +2941,7 @@ export default function ReviewStep({ file, onCommitted }) {
                 className="btn primary sm"
                 onClick={confirmMerge}
                 disabled={mergeBusy || mergeConfirm.count === 0}
+                autoFocus
               >
                 <Icon name="check" size={15} />
                 {mergeBusy ? "Merging…" : `Merge ${mergeConfirm.count} row${mergeConfirm.count === 1 ? "" : "s"}`}

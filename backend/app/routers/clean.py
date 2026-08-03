@@ -1,9 +1,13 @@
 import difflib
+import hashlib
 import io
 import json
+import logging
+import threading
 from collections import Counter
 from collections.abc import Iterable
 
+import numpy as np
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
 from openpyxl import Workbook
@@ -11,6 +15,7 @@ from openpyxl.cell import WriteOnlyCell
 from openpyxl.comments import Comment
 from openpyxl.styles import Font, PatternFill
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, defer
 
 from ..config import get_settings
@@ -30,16 +35,16 @@ from ..core.cleaning import (
 )
 from ..core.http import content_disposition, safe_filename
 from ..core.master_store import find_conflicts, upsert_master_records
-from ..database import get_db
-from ..deps import get_current_user
+from ..database import SessionLocal, get_db
+from ..deps import can_access_all_branches, get_current_user
 from ..models import (
     MASTER_COLUMN_TO_ATTR,
     ActivityLog,
     Branch,
     FileStatus,
+    SimilarCountsCache,
     UploadedFile,
     User,
-    UserRole,
 )
 from ..schemas import (
     BulkFix,
@@ -58,6 +63,8 @@ from ..schemas import (
     RowsBatchEdit,
     RowsDrop,
     RowsRevert,
+    SimilarCount,
+    SimilarCountsOut,
     SimilarValue,
     SimilarValuesOut,
     TagGroup,
@@ -86,6 +93,7 @@ def _grade(score: int) -> str:
 
 settings = get_settings()
 router = APIRouter(tags=["clean"])
+logger = logging.getLogger("uvicorn.error")
 
 
 def _get_file_or_404(file_id: int, user: User, db: Session) -> UploadedFile:
@@ -99,7 +107,7 @@ def _get_file_or_404(file_id: int, user: User, db: Session) -> UploadedFile:
     if f is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "File not found")
     branch = db.get(Branch, f.branch_id)
-    if user.role != UserRole.admin and branch.owner_id != user.id:
+    if not can_access_all_branches(user) and branch.owner_id != user.id:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Not your branch")
     return f
 
@@ -346,6 +354,7 @@ def _edit_in_place(f: UploadedFile, changed: set[int]) -> bool:
     entry["sig"] = _signature(f)
     entry["summary"] = None
     entry["profile"] = None
+    entry.pop("val_counts", None)  # edited cells change the column's value multiset
     return True
 
 
@@ -452,16 +461,18 @@ def _review_payload(
     direction: str = "asc",
     value_filters: dict[str, list[str]] | None = None,
     query: str | None = None,
+    blanks: str | None = None,
 ) -> "ReviewOut":
     """Build the full Review payload (summary + profile + page of rows). Shared by
     GET /review and the edit/accept mutations so they each return in one trip.
 
     Optional `tags` (match ANY), `value_filters` (per-column value filters, AND'd
-    across columns), `query` (tab-wide text search) and `sort`/`direction` are
-    applied server-side so they hold across pages."""
+    across columns), `query` (tab-wide text search), `blanks` (only rows with an
+    empty cell) and `sort`/`direction` are applied server-side so they hold across
+    pages."""
     rows = build_deleted_rows(f) if view == "deleted" else build_rows(f)
     manual = _manual_kinds(f)
-    filtered = _filter_rows(rows, view, tag, tags, value_filters, manual, query)
+    filtered = _filter_rows(rows, view, tag, tags, value_filters, manual, query, blanks)
     filtered = _sort_rows(filtered, sort, direction)
     total = len(filtered)
     page = max(0, page)
@@ -691,6 +702,11 @@ def _parse_value_filters(raw: str | None) -> dict[str, list[str]]:
     return out
 
 
+def _is_blank(value: object) -> bool:
+    """A cell counts as blank when it holds nothing but whitespace."""
+    return not str(value or "").strip()
+
+
 def _filter_rows(
     rows: list[CleanRow],
     view: str | None,
@@ -699,6 +715,7 @@ def _filter_rows(
     value_filters: dict[str, list[str]] | None = None,
     manual: dict[int, str] | None = None,
     query: str | None = None,
+    blanks: str | None = None,
 ) -> list[CleanRow]:
     """Narrow the cleaned rows to one Review tab, then apply the tag/value filters.
 
@@ -713,7 +730,10 @@ def _filter_rows(
 
     `query` is the tab-wide search box: keep a row when ANY of its cell values
     contains the text (case-insensitive substring), so a value copied from the grid
-    finds its row in whichever tab is open."""
+    finds its row in whichever tab is open.
+
+    `blanks` keeps only rows with an empty cell: "*" for a blank anywhere in the
+    row, or a column name for a blank in that one column."""
     if view in ("clean", "error"):
         rows = [r for r in rows if r.status == view]
     elif view in ("auto_clean", "manual_clean"):
@@ -749,6 +769,12 @@ def _filter_rows(
                 r for r in rows
                 if any(needle in (v or "").lower() for v in r.values.values())
             ]
+    if blanks:
+        # "Rows with blank cells": either anywhere in the row, or in one column.
+        if blanks == "*":
+            rows = [r for r in rows if any(_is_blank(v) for v in r.values.values())]
+        else:
+            rows = [r for r in rows if _is_blank(r.values.get(blanks, ""))]
     return rows
 
 
@@ -790,6 +816,7 @@ def review(
     dir: str = "asc",
     filters: str | None = None,
     q: str | None = None,
+    blanks: str | None = None,
     page: int = 0,
     page_size: int = 50,
     include_profile: bool = True,
@@ -811,7 +838,7 @@ def review(
     return _review_payload(
         f, view, tag, page, page_size, include_profile,
         tags=_split_csv(tags), sort=sort, direction=dir,
-        value_filters=_parse_value_filters(filters), query=q,
+        value_filters=_parse_value_filters(filters), query=q, blanks=blanks,
     )
 
 
@@ -857,10 +884,7 @@ def column_unique_values(
     f = _get_file_or_404(file_id, user, db)
     if column not in _active_columns(f):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Column not found")
-    counts: Counter = Counter()
-    for r in build_rows(f):
-        for piece in _value_pieces(column, r.values.get(column, "")):
-            counts[piece] += 1
+    counts = _column_value_counts(f, column)
     needle = (q or "").strip().lower()
     if needle:
         matched = [(v, n) for v, n in counts.items() if needle in v.lower()]
@@ -918,10 +942,7 @@ def column_similar_values(
         return SimilarValuesOut(column=column, value=value, matches=[])
     threshold = min(max(min_ratio, 0.0), 1.0)
 
-    counts: Counter = Counter()
-    for r in build_rows(f):
-        for piece in _value_pieces(column, r.values.get(column, "")):
-            counts[piece] += 1
+    counts = _column_value_counts(f, column)
 
     multi = " " in base
     base_sorted = _token_sorted(base) if multi else base
@@ -935,9 +956,15 @@ def column_similar_values(
         # real_quick_ratio is a cheap upper bound: skip clear non-matches fast.
         ratio = sm.ratio() if sm.real_quick_ratio() >= threshold else 0.0
         if multi:
+            # autojunk=False to match the direct comparison above (and the badge
+            # scan): difflib's autojunk heuristic silently ignores frequent
+            # characters once a value passes 200 chars, which would make this one
+            # comparison score differently from every other.
             ratio = max(
                 ratio,
-                difflib.SequenceMatcher(None, _token_sorted(nv), base_sorted).ratio(),
+                difflib.SequenceMatcher(
+                    None, _token_sorted(nv), base_sorted, autojunk=False
+                ).ratio(),
             )
         if ratio >= threshold:
             matches.append((v, n, ratio))
@@ -949,6 +976,285 @@ def column_similar_values(
         value=value,
         matches=[SimilarValue(value=v, count=n, ratio=round(r, 4)) for v, n, r in matches],
     )
+
+
+# The 90/80/70 badge on every unique-values row needs, per value, how many other
+# distinct values of the column are near-matches. Two things make that affordable:
+#
+#  1. Only the values the panel can actually show are SCORED (the top
+#     `_UNIQUE_CAP` by row count — exactly what `column_unique_values` returns).
+#     A real singer column has ~11k distinct names but the panel lists 1000, so
+#     this alone removes ~90% of the work. Candidates are still the FULL distinct
+#     set, so a scored value's count is complete.
+#  2. Candidates are pruned with difflib's OWN upper bound — the character
+#     multiset overlap behind `quick_ratio` — evaluated for every pair at once
+#     with numpy. A pair it drops could never have reached 70%, so what survives
+#     is scored with plain difflib and the counts are EXACT: a row's "90" badge is
+#     precisely what the "find similar" popup lists at ≥90%.
+#
+# Measured on a real 11,292-distinct artist column: 8.5M candidate pairs pruned to
+# 181k, ~9s total, byte-identical to a full all-pairs scan (which takes ~59s).
+_SIM_COUNT_MAX_DISTINCT = 25_000  # above this, no badges (ISRC/UPC — not merge targets)
+_SIM_COUNT_BUDGET = 400_000  # ceiling on surviving pairs actually scored. Values are
+#                              scored most-common first, so if a pathological column
+#                              (e.g. same-shaped IDs, where every pair looks similar)
+#                              hits this, the visible top values still get badges and
+#                              the rest simply fall back to the ✦ button.
+_SIM_COUNT_MAX_JOBS = 2  # concurrent background scans, so a burst can't hog the CPU
+_SIM_COUNT_ALPHABET = 256  # max columns in the prefilter matrix (see `_similar_counts`)
+
+
+def _column_value_counts(f: UploadedFile, column: str) -> Counter:
+    """How many rows carry each distinct value of `column` (pipe-split for name
+    fields). Memoised on the file's clean-cache entry: the unique-values panel,
+    the badge poll and the badge scan all need it, and it is a full pass over the
+    cleaned rows."""
+    e = _entry(f)
+    memo = e.setdefault("val_counts", {})
+    hit = memo.get(column)
+    if hit is None:
+        counts: Counter = Counter()
+        for r in build_rows(f):
+            for piece in _value_pieces(column, r.values.get(column, "")):
+                counts[piece] += 1
+        memo[column] = hit = counts
+    return hit
+
+
+def _values_fingerprint(counts: Counter) -> str:
+    """A stable hash of a column's exact value multiset. Badge counts depend on
+    nothing else, so this — not the whole file's signature — decides whether a
+    cached scan is still valid: merging inside this column invalidates it, an edit
+    in any other column does not."""
+    h = hashlib.sha256()
+    for v, n in sorted(counts.items()):
+        h.update(f"{v}\x00{n}\x01".encode())
+    return h.hexdigest()
+
+
+def _similar_counts(counts: Counter) -> dict[str, tuple[int, int, int]] | None:
+    """For the most common `_UNIQUE_CAP` values of a column, how many OTHER distinct
+    values fall within 90 / 80 / 70% similarity — cumulative, so c90 <= c80 <= c70.
+
+    Every scored value gets an entry, INCLUDING all-zero ones: the panel needs to
+    tell "scored, no variants" (dim 0 badges) from "not scored" (✦ button) apart.
+
+    Each count matches what `column_similar_values` (the "find similar" popup) lists
+    for that value at the matching strictness: same normalization, same token-sorted
+    rescue for multi-word names, same "identical once normalized -> skip" rule.
+
+    Pure CPU over a plain Counter — no ORM, no DB — so this runs safely on a worker
+    thread. Returns None when the column has too many distinct values to score."""
+    # One entry per distinct value, normalized form pre-computed, ordered
+    # most-common first so scoring (and the safety budget) spends on visible values.
+    raws: list[str] = []
+    norms: list[str] = []
+    sorts: list[str] = []
+    multis: list[bool] = []
+    for v, _n in counts.most_common():
+        nv = _dedup_norm(v)
+        if not nv:
+            continue
+        raws.append(v)
+        norms.append(nv)
+        m = " " in nv
+        multis.append(m)
+        sorts.append(_token_sorted(nv) if m else nv)
+    n = len(raws)
+    if n > _SIM_COUNT_MAX_DISTINCT:
+        return None
+
+    # Character-count matrix, one row per value. `_token_sorted` only reorders
+    # words, so a value and its token-sorted form share this row — one bound
+    # covers both ratios.
+    #
+    # A column in a non-Latin script can use thousands of distinct characters, so
+    # characters beyond `_SIM_COUNT_ALPHABET` are folded into shared buckets to
+    # bound the matrix. Folding can only ever ADD to a pair's counted overlap, so
+    # the value stays an upper bound and the prune stays lossless.
+    alphabet = sorted({ch for s in norms for ch in s})
+    if len(alphabet) <= _SIM_COUNT_ALPHABET:
+        col_of = {ch: k for k, ch in enumerate(alphabet)}
+        width = len(alphabet) or 1
+    else:
+        width = _SIM_COUNT_ALPHABET
+        col_of = {ch: ord(ch) % width for ch in alphabet}
+    mat = np.zeros((n, width), dtype=np.uint16)
+    for i, s in enumerate(norms):
+        for ch, c in Counter(s).items():
+            mat[i, col_of[ch]] += c  # += : folded characters share a bucket
+    lens = np.array([len(s) for s in norms], dtype=np.int32)
+
+    n_bases = min(n, _UNIQUE_CAP)
+    # Bases are prefiltered in blocks; keep each block's temporary ~8M cells.
+    block = max(1, 8_000_000 // max(1, n * width))
+    result: dict[str, tuple[int, int, int]] = {}
+    budget = _SIM_COUNT_BUDGET
+    for start in range(0, n_bases, block):
+        if budget <= 0:
+            break  # ceiling reached; the rest of the tail keeps the ✦ fallback
+        stop = min(start + block, n_bases)
+        # |multiset(a) ∩ multiset(b)| for this block against every distinct value.
+        # difflib's ratio can never exceed 2*overlap/(len(a)+len(b)), so dropping
+        # pairs below the 70% floor here is lossless.
+        overlap = np.minimum(mat[start:stop][:, None, :], mat[None, :, :]).sum(
+            axis=2, dtype=np.int32
+        )
+        keep = 2 * overlap >= 0.7 * (lens[start:stop][:, None] + lens[None, :])
+        for row in range(stop - start):
+            if budget <= 0:
+                break
+            i = start + row
+            base, base_multi, base_sorted = norms[i], multis[i], sorts[i]
+            # seq2 stays the base across the loop, so difflib builds its index once.
+            sm = difflib.SequenceMatcher(None, "", base, autojunk=False)
+            smt = (
+                difflib.SequenceMatcher(None, "", base_sorted, autojunk=False)
+                if base_multi
+                else None
+            )
+            c9 = c8 = c7 = 0
+            for j in np.flatnonzero(keep[row]):
+                nv = norms[j]
+                if nv == base:
+                    continue  # identical once normalized (incl. self) -> nothing to merge
+                budget -= 1
+                sm.set_seq1(nv)
+                ratio = sm.ratio()
+                # A word-order variant ("Kumar Sanu" / "Sanu Kumar") only shows up in
+                # the token-sorted ratio; ≥90% already tops the bands, so skip it there.
+                if base_multi and ratio < 0.9:
+                    smt.set_seq1(sorts[j])
+                    r2 = smt.ratio()
+                    if r2 > ratio:
+                        ratio = r2
+                if ratio >= 0.7:
+                    c7 += 1
+                    if ratio >= 0.8:
+                        c8 += 1
+                        if ratio >= 0.9:
+                            c9 += 1
+            result[raws[i]] = (c9, c8, c7)
+    return result
+
+
+# In-flight background scans, keyed by (file id, column) -> the fingerprint being
+# scanned. Guarded by a lock: the panel polls, so several requests race here.
+_SIM_JOBS: dict[tuple[int, str], str] = {}
+_SIM_JOBS_LOCK = threading.Lock()
+
+
+def _store_similar_counts(
+    file_id: int, column: str, fingerprint: str, counts: dict | None
+) -> None:
+    """Persist one finished scan, replacing any older row for the same column.
+
+    Retries once on a unique-constraint clash: with more than one API worker two
+    processes can scan the same column and race to insert the (file, column) row.
+    Either result is equally valid, so the loser just updates what the winner wrote.
+    """
+    payload = [[v, c9, c8, c7] for v, (c9, c8, c7) in (counts or {}).items()]
+    for attempt in (1, 2):
+        try:
+            with SessionLocal() as db:
+                row = db.execute(
+                    select(SimilarCountsCache).where(
+                        SimilarCountsCache.file_id == file_id,
+                        SimilarCountsCache.column_name == column,
+                    )
+                ).scalar_one_or_none()
+                if row is None:
+                    row = SimilarCountsCache(file_id=file_id, column_name=column)
+                    db.add(row)
+                row.values_hash = fingerprint
+                row.computed = counts is not None
+                row.counts = payload
+                db.commit()
+            return
+        except IntegrityError:
+            if attempt == 2:
+                raise
+
+
+def _run_similar_counts_job(
+    file_id: int, column: str, fingerprint: str, counts: Counter
+) -> None:
+    """Worker body: score the column, persist the result, release the job slot.
+    Takes only plain data (a Counter), never an ORM object — the request's Session
+    belongs to the request thread."""
+    try:
+        _store_similar_counts(file_id, column, fingerprint, _similar_counts(counts))
+    except Exception:  # never leave a wedged slot behind
+        logger.exception("similar-counts scan failed for file %s column %r", file_id, column)
+    finally:
+        with _SIM_JOBS_LOCK:
+            if _SIM_JOBS.get((file_id, column)) == fingerprint:
+                del _SIM_JOBS[(file_id, column)]
+
+
+def _start_similar_counts_job(
+    file_id: int, column: str, fingerprint: str, counts: Counter
+) -> None:
+    """Kick off a scan unless one is already running for this exact column state.
+    Silently does nothing when all job slots are busy — the panel is polling, so
+    the next poll starts it."""
+    key = (file_id, column)
+    with _SIM_JOBS_LOCK:
+        if _SIM_JOBS.get(key) == fingerprint:
+            return  # already scanning this exact state
+        if len(_SIM_JOBS) >= _SIM_COUNT_MAX_JOBS and key not in _SIM_JOBS:
+            return
+        _SIM_JOBS[key] = fingerprint
+    threading.Thread(
+        target=_run_similar_counts_job,
+        args=(file_id, column, fingerprint, counts),
+        name=f"simcounts-{file_id}-{column}",
+        daemon=True,
+    ).start()
+
+
+@router.get("/api/files/{file_id}/columns/similar-counts", response_model=SimilarCountsOut)
+def column_similar_counts(
+    file_id: int,
+    column: str,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Per-value 90/80/70 near-match counts for a column — the badges on the
+    unique-values panel, so a reviewer sees at a glance which values have spelling
+    variants to merge without opening each one.
+
+    The scan takes seconds on a big name column, so it runs on a worker thread and
+    its result is cached in the database (surviving restarts and redeploys). This
+    answers `computing` while a scan is in flight; the panel polls until `ready`."""
+    f = _get_file_or_404(file_id, user, db)
+    if column not in _active_columns(f):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Column not found")
+
+    value_counts = _column_value_counts(f, column)
+    fingerprint = _values_fingerprint(value_counts)
+    cached = db.execute(
+        select(SimilarCountsCache).where(
+            SimilarCountsCache.file_id == file_id,
+            SimilarCountsCache.column_name == column,
+            SimilarCountsCache.values_hash == fingerprint,
+        )
+    ).scalar_one_or_none()
+    if cached is not None:
+        if not cached.computed:
+            return SimilarCountsOut(column=column, status="skipped", computed=False, counts=[])
+        return SimilarCountsOut(
+            column=column,
+            status="ready",
+            computed=True,
+            counts=[
+                SimilarCount(value=v, c90=c9, c80=c8, c70=c7)
+                for v, c9, c8, c7 in cached.counts or []
+            ],
+        )
+
+    _start_similar_counts_job(file_id, column, fingerprint, value_counts)
+    return SimilarCountsOut(column=column, status="computing", computed=False, counts=[])
 
 
 def _remap_cell(col: str, value: str, alias: dict[str, str]) -> str:
@@ -1021,6 +1327,7 @@ def remap_column_value(
     dir: str = "asc",
     filters: str | None = None,
     q: str | None = None,
+    blanks: str | None = None,
     page: int = 0,
     page_size: int = 50,
     include_profile: bool = True,
@@ -1060,7 +1367,7 @@ def remap_column_value(
     return _review_payload(
         f, view, tag, page, page_size, include_profile,
         tags=_split_csv(tags), sort=sort, direction=dir,
-        value_filters=_parse_value_filters(filters), query=q,
+        value_filters=_parse_value_filters(filters), query=q, blanks=blanks,
     )
 
 
@@ -1076,6 +1383,7 @@ def fill_column(
     dir: str = "asc",
     filters: str | None = None,
     q: str | None = None,
+    blanks: str | None = None,
     page: int = 0,
     page_size: int = 50,
     include_profile: bool = True,
@@ -1103,7 +1411,7 @@ def fill_column(
     return _review_payload(
         f, view, tag, page, page_size, include_profile,
         tags=_split_csv(tags), sort=sort, direction=dir,
-        value_filters=_parse_value_filters(filters), query=q,
+        value_filters=_parse_value_filters(filters), query=q, blanks=blanks,
     )
 
 
@@ -1248,6 +1556,7 @@ def export_rows(
     dir: str = "asc",
     filters: str | None = None,
     q: str | None = None,
+    blanks: str | None = None,
     filename: str | None = None,
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
@@ -1266,7 +1575,7 @@ def export_rows(
     value_filters = _parse_value_filters(filters)
     base = build_deleted_rows(f) if view == "deleted" else build_rows(f)
     rows = _filter_rows(
-        base, view, tag, _split_csv(tags), value_filters, manual, q
+        base, view, tag, _split_csv(tags), value_filters, manual, q, blanks
     )
     rows = _sort_rows(rows, sort, dir)
     cols = _active_columns(f)
@@ -1373,6 +1682,7 @@ def edit_rows(
     dir: str = "asc",
     filters: str | None = None,
     q: str | None = None,
+    blanks: str | None = None,
     page: int = 0,
     page_size: int = 50,
     include_profile: bool = True,
@@ -1420,7 +1730,7 @@ def edit_rows(
     return _review_payload(
         f, view, tag, page, page_size, include_profile,
         tags=_split_csv(tags), sort=sort, direction=dir,
-        value_filters=_parse_value_filters(filters), query=q,
+        value_filters=_parse_value_filters(filters), query=q, blanks=blanks,
     )
 
 
@@ -1435,6 +1745,7 @@ def accept_rows(
     dir: str = "asc",
     filters: str | None = None,
     q: str | None = None,
+    blanks: str | None = None,
     page: int = 0,
     page_size: int = 50,
     include_profile: bool = True,
@@ -1460,7 +1771,7 @@ def accept_rows(
     return _review_payload(
         f, view, tag, page, page_size, include_profile,
         tags=_split_csv(tags), sort=sort, direction=dir,
-        value_filters=_parse_value_filters(filters), query=q,
+        value_filters=_parse_value_filters(filters), query=q, blanks=blanks,
     )
 
 
@@ -1475,6 +1786,7 @@ def revert_rows(
     dir: str = "asc",
     filters: str | None = None,
     q: str | None = None,
+    blanks: str | None = None,
     select_all: bool = False,
     page: int = 0,
     page_size: int = 50,
@@ -1526,7 +1838,7 @@ def revert_rows(
     return _review_payload(
         f, view, tag, page, page_size, include_profile,
         tags=_split_csv(tags), sort=sort, direction=dir,
-        value_filters=_parse_value_filters(filters), query=q,
+        value_filters=_parse_value_filters(filters), query=q, blanks=blanks,
     )
 
 
@@ -1541,6 +1853,7 @@ def drop_rows(
     dir: str = "asc",
     filters: str | None = None,
     q: str | None = None,
+    blanks: str | None = None,
     select_all: bool = False,
     page: int = 0,
     page_size: int = 50,
@@ -1585,7 +1898,7 @@ def drop_rows(
     return _review_payload(
         f, view, tag, page, page_size, include_profile,
         tags=_split_csv(tags), sort=sort, direction=dir,
-        value_filters=_parse_value_filters(filters), query=q,
+        value_filters=_parse_value_filters(filters), query=q, blanks=blanks,
     )
 
 
@@ -1600,6 +1913,7 @@ def restore_rows(
     dir: str = "asc",
     filters: str | None = None,
     q: str | None = None,
+    blanks: str | None = None,
     select_all: bool = False,
     page: int = 0,
     page_size: int = 50,
@@ -1639,7 +1953,7 @@ def restore_rows(
     return _review_payload(
         f, view, tag, page, page_size, include_profile,
         tags=_split_csv(tags), sort=sort, direction=dir,
-        value_filters=_parse_value_filters(filters), query=q,
+        value_filters=_parse_value_filters(filters), query=q, blanks=blanks,
     )
 
 
