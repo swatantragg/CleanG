@@ -26,8 +26,6 @@ export default function App() {
 
   return (
     <>
-      <span className="version-badge">SKV2.7.1</span>
-      <span className="made-by">Developed By Rahul and SK</span>
     <Routes>
       <Route
         path="/login"
@@ -55,6 +53,12 @@ export default function App() {
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
+    {/* Real page footer: last thing in the document, so it scrolls with the page
+        and only comes into view at the very bottom — never pinned over content. */}
+    <footer className="app-footer">
+      <span className="version-badge">SKV2.7.2</span>
+      <span className="made-by">Developed By Rahul and SK</span>
+    </footer>
     </>
   );
 }

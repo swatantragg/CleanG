@@ -3,6 +3,7 @@ import hashlib
 import io
 import json
 import logging
+import re
 import threading
 from collections import Counter
 from collections.abc import Iterable
@@ -149,6 +150,18 @@ def _value_pieces(col: str, value: str) -> list[str]:
     if _is_name_column(col):
         return [p.strip() for p in v.split(NAME_SEP) if p.strip()]
     return [v]
+
+
+def _merge_key(value: str | None) -> str:
+    """A value's identity FOR MERGING: whitespace-collapsed, casing preserved.
+
+    `_dedup_norm` lower-cases, which is right when judging whether two rows are the
+    same record but wrong here: it makes "Film Songs" and "Film songs" the same
+    value, so the panel offered no way to merge one into the other and the merge
+    itself silently rewrote nothing. Casing is exactly the difference a reviewer
+    merges away, so it has to count as part of the identity.
+    """
+    return re.sub(r"\s+", " ", (value or "").strip())
 
 
 # --------------------------------------------------------------------------
@@ -751,14 +764,16 @@ def _filter_rows(
     if value_filters:
         # Exact-value filters picked from each column's unique-values panel: match
         # the whole cell (or one exact piped piece for name fields) — never a
-        # substring, or picking UPC "256" would also drag in "12564". Each column
-        # narrows the set in turn (AND); its values match ANY (OR).
+        # substring, or picking UPC "256" would also drag in "12564". The match is
+        # case-SENSITIVE for the same reason: the panel lists "Film Songs" and
+        # "Film songs" as two rows, so filtering on one must not drag in the other.
+        # Each column narrows the set in turn (AND); its values match ANY (OR).
         for col, vals in value_filters.items():
-            targets = {v.strip().lower() for v in vals}
+            targets = {_merge_key(v) for v in vals}
             rows = [
                 r for r in rows
                 if any(
-                    p.lower() in targets
+                    _merge_key(p) in targets
                     for p in _value_pieces(col, r.values.get(col, ""))
                 )
             ]
@@ -932,12 +947,15 @@ def column_similar_values(
     Ghosal / Ghoshal / Ghoshall), so the reviewer merges an accurate cluster instead
     of hunting through the whole list.
 
-    `min_ratio` is the similarity floor (0..1). Values that normalize identically to
-    `value` are omitted — merging them would be a no-op."""
+    `min_ratio` is the similarity floor (0..1). Only `value` itself is omitted —
+    a variant that differs from it ONLY in casing ("Film Songs" / "Film songs") is a
+    genuine merge candidate and is listed first, at ratio 1.0. Scoring stays
+    case-insensitive, so casing never drags a real variant below the threshold."""
     f = _get_file_or_404(file_id, user, db)
     if column not in _active_columns(f):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Column not found")
     base = _dedup_norm(value)
+    base_key = _merge_key(value)
     if not base:
         return SimilarValuesOut(column=column, value=value, matches=[])
     threshold = min(max(min_ratio, 0.0), 1.0)
@@ -950,8 +968,8 @@ def column_similar_values(
     matches: list[tuple[str, int, float]] = []
     for v, n in counts.items():
         nv = _dedup_norm(v)
-        if not nv or nv == base:
-            continue  # identical once normalized -> nothing to merge
+        if not nv or _merge_key(v) == base_key:
+            continue  # the value itself -> nothing to merge
         sm.set_seq1(nv)
         # real_quick_ratio is a cheap upper bound: skip clear non-matches fast.
         ratio = sm.ratio() if sm.real_quick_ratio() >= threshold else 0.0
@@ -1002,6 +1020,9 @@ _SIM_COUNT_BUDGET = 400_000  # ceiling on surviving pairs actually scored. Value
 #                              the rest simply fall back to the ✦ button.
 _SIM_COUNT_MAX_JOBS = 2  # concurrent background scans, so a burst can't hog the CPU
 _SIM_COUNT_ALPHABET = 256  # max columns in the prefilter matrix (see `_similar_counts`)
+# Bumped whenever the scan's matching rules change, so counts cached under the old
+# rules are recomputed instead of served. 2: case-only variants now count as variants.
+_SIM_ALGO_VERSION = 2
 
 
 def _column_value_counts(f: UploadedFile, column: str) -> Counter:
@@ -1025,8 +1046,12 @@ def _values_fingerprint(counts: Counter) -> str:
     """A stable hash of a column's exact value multiset. Badge counts depend on
     nothing else, so this — not the whole file's signature — decides whether a
     cached scan is still valid: merging inside this column invalidates it, an edit
-    in any other column does not."""
+    in any other column does not.
+
+    `_SIM_ALGO_VERSION` rides along so a change to the scan's matching rules retires
+    every cached count that was computed under the old rules."""
     h = hashlib.sha256()
+    h.update(f"algo{_SIM_ALGO_VERSION}\x02".encode())
     for v, n in sorted(counts.items()):
         h.update(f"{v}\x00{n}\x01".encode())
     return h.hexdigest()
@@ -1040,14 +1065,16 @@ def _similar_counts(counts: Counter) -> dict[str, tuple[int, int, int]] | None:
     tell "scored, no variants" (dim 0 badges) from "not scored" (✦ button) apart.
 
     Each count matches what `column_similar_values` (the "find similar" popup) lists
-    for that value at the matching strictness: same normalization, same token-sorted
-    rescue for multi-word names, same "identical once normalized -> skip" rule.
+    for that value at the matching strictness: same case-insensitive scoring, same
+    token-sorted rescue for multi-word names, and the same identity rule — only the
+    value ITSELF is skipped, so a case-only variant counts as a variant.
 
     Pure CPU over a plain Counter — no ORM, no DB — so this runs safely on a worker
     thread. Returns None when the column has too many distinct values to score."""
     # One entry per distinct value, normalized form pre-computed, ordered
     # most-common first so scoring (and the safety budget) spends on visible values.
     raws: list[str] = []
+    keys: list[str] = []  # case-preserving identity: only a value IS itself
     norms: list[str] = []
     sorts: list[str] = []
     multis: list[bool] = []
@@ -1056,6 +1083,7 @@ def _similar_counts(counts: Counter) -> dict[str, tuple[int, int, int]] | None:
         if not nv:
             continue
         raws.append(v)
+        keys.append(_merge_key(v))
         norms.append(nv)
         m = " " in nv
         multis.append(m)
@@ -1106,6 +1134,7 @@ def _similar_counts(counts: Counter) -> dict[str, tuple[int, int, int]] | None:
                 break
             i = start + row
             base, base_multi, base_sorted = norms[i], multis[i], sorts[i]
+            base_key = keys[i]
             # seq2 stays the base across the loop, so difflib builds its index once.
             sm = difflib.SequenceMatcher(None, "", base, autojunk=False)
             smt = (
@@ -1116,8 +1145,8 @@ def _similar_counts(counts: Counter) -> dict[str, tuple[int, int, int]] | None:
             c9 = c8 = c7 = 0
             for j in np.flatnonzero(keep[row]):
                 nv = norms[j]
-                if nv == base:
-                    continue  # identical once normalized (incl. self) -> nothing to merge
+                if keys[j] == base_key:
+                    continue  # the value itself -> nothing to merge
                 budget -= 1
                 sm.set_seq1(nv)
                 ratio = sm.ratio()
@@ -1259,16 +1288,20 @@ def column_similar_counts(
 
 def _remap_cell(col: str, value: str, alias: dict[str, str]) -> str:
     """Rewrite one cell, replacing each matching piece via `alias` (keyed by the
-    normalized piece). Name fields are split on NAME_SEP, each piece remapped,
+    piece's `_merge_key`). Name fields are split on NAME_SEP, each piece remapped,
     then re-joined de-duped with order preserved (so "Shreya Ghosal | Arijit" ->
     "Shreya Ghoshal | Arijit", and a cell holding both variants collapses to one).
-    Non-name columns match/replace the whole value."""
+    Non-name columns match/replace the whole value.
+
+    Matching is case-sensitive: the reviewer ticks exact values off the panel, so
+    only those are rewritten — merging "Film songs" away never quietly rewrites a
+    "FILM SONGS" nobody selected."""
     pieces = _value_pieces(col, value)
     if not pieces:
         return value
     out: list[str] = []
     for p in pieces:
-        repl = alias.get(_dedup_norm(p), p)
+        repl = alias.get(_merge_key(p), p)
         # The canonical value may itself be multi-name ("A | B"); split it too.
         for sub in (_value_pieces(col, repl) or [repl]):
             if sub not in out:
@@ -1279,13 +1312,18 @@ def _remap_cell(col: str, value: str, alias: dict[str, str]) -> str:
 
 
 def _remap_alias(payload: ValueRemap) -> dict[str, str]:
-    """The {normalized variant -> canonical} map for a remap request, dropping
-    blanks and any variant that already equals the canonical value."""
+    """The {variant key -> canonical} map for a remap request, dropping blanks and
+    any variant that already IS the canonical value.
+
+    Keyed and compared with `_merge_key`, so a variant that differs from the target
+    only in casing is a real merge, not a discarded no-op — dropping it here is what
+    made "Film songs" -> "Film Songs" report 0 affected rows and change nothing."""
     to = payload.to.strip()
+    to_key = _merge_key(to)
     return {
-        _dedup_norm(v): to
+        _merge_key(v): to
         for v in payload.from_values
-        if _dedup_norm(v) and _dedup_norm(v) != _dedup_norm(to)
+        if _merge_key(v) and _merge_key(v) != to_key
     }
 
 
