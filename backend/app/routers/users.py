@@ -3,10 +3,16 @@ from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from ..config import MAX_SUPER_ADMINS, is_super_admin_email
+from ..config import MAX_SUPER_ADMINS, SUPER_ADMIN_EMAILS, is_super_admin_email
 from ..core.audit import log_event
 from ..database import get_db
-from ..deps import is_super_admin, require_admin, require_super_admin, visible_role
+from ..deps import (
+    is_super_admin,
+    require_admin,
+    require_super_admin,
+    user_out,
+    visible_role,
+)
 from ..models import AuditEvent, FileActivity, User, UserRole
 from ..schemas import (
     AuditEventOut,
@@ -32,19 +38,13 @@ def _get_user_or_404(user_id: int, db: Session) -> User:
     return user
 
 
-def _out(user: User, viewer: User) -> UserOut:
-    """Serialize `user` with the role `viewer` is allowed to see."""
-    out = UserOut.model_validate(user)
-    return out.model_copy(update={"role": visible_role(user.role, viewer)})
-
-
 @router.get("", response_model=list[UserOut])
 def list_users(
     db: Session = Depends(get_db),
     admin: User = Depends(require_admin),
 ):
     users = db.scalars(select(User).order_by(User.created_at.desc())).all()
-    return [_out(u, admin) for u in users]
+    return [user_out(u, admin) for u in users]
 
 
 @router.post("", response_model=UserOut, status_code=status.HTTP_201_CREATED)
@@ -71,13 +71,16 @@ def create_user(
     role = payload.role
     if is_super_admin_email(payload.email):
         supers = db.scalar(
-            select(func.count()).select_from(User).where(User.role == UserRole.super_admin)
+            select(func.count())
+            .select_from(User)
+            .where(func.lower(User.email).in_(SUPER_ADMIN_EMAILS))
         )
         if supers >= MAX_SUPER_ADMINS or (supers and not is_super_admin(admin)):
             raise HTTPException(
                 status.HTTP_403_FORBIDDEN, "This email address is reserved."
             )
-        role = UserRole.super_admin
+        # Stored as admin; super admin is derived from the email (deps.py).
+        role = UserRole.admin
     user = User(
         email=payload.email,
         full_name=payload.full_name,
@@ -91,7 +94,7 @@ def create_user(
     db.refresh(user)
     log_event(db, request, "user_created", user=admin,
               detail=f"created {user.email} (role={user.role.value}, id={user.id})")
-    return _out(user, admin)
+    return user_out(user, admin)
 
 
 @router.patch("/{user_id}", response_model=UserOut)
@@ -114,7 +117,7 @@ def update_user(
         )
     # A super admin's role and active state are fixed (they come from the email
     # list), whoever asks — this is what keeps the two accounts in place.
-    if user.role == UserRole.super_admin and (
+    if is_super_admin(user) and (
         payload.role is not None or payload.is_active is False
     ):
         raise HTTPException(status.HTTP_403_FORBIDDEN, _PROTECTED.format("changed"))
@@ -132,7 +135,7 @@ def update_user(
     if changes:
         log_event(db, request, "user_updated", user=admin,
                   detail=f"{user.email} (id={user.id}): {', '.join(changes)}")
-    return _out(user, admin)
+    return user_out(user, admin)
 
 
 @router.post("/{user_id}/reset-password", response_model=UserOut)
@@ -146,7 +149,7 @@ def reset_password(
     """Super-admin-only: set a new password for any user or admin and revoke
     their existing sessions. Super admin accounts manage their own password."""
     user = _get_user_or_404(user_id, db)
-    if user.role == UserRole.super_admin:
+    if is_super_admin(user):
         raise HTTPException(
             status.HTTP_403_FORBIDDEN,
             "Super admin passwords can only be changed by their owner.",
@@ -162,7 +165,7 @@ def reset_password(
     db.refresh(user)
     log_event(db, request, "password_reset", user=admin,
               detail=f"reset password for {user.email} (id={user.id})")
-    return _out(user, admin)
+    return user_out(user, admin)
 
 
 @router.delete("/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -184,7 +187,7 @@ def delete_user(
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST, "You cannot delete your own account."
         )
-    if user.role == UserRole.super_admin:
+    if is_super_admin(user):
         raise HTTPException(status.HTTP_403_FORBIDDEN, _PROTECTED.format("deleted"))
     email = user.email
     # Preserve the security audit trail but detach it from the row being removed.
@@ -221,7 +224,7 @@ def file_activity(
     to the data.
     """
     query = (
-        select(FileActivity, User.role)
+        select(FileActivity, User)
         .outerjoin(User, User.id == FileActivity.user_id)
         .order_by(FileActivity.created_at.desc())
         .limit(limit)
@@ -234,12 +237,12 @@ def file_activity(
             user_id=fa.user_id,
             user_name=fa.user_name,
             user_email=fa.user_email,
-            role=visible_role(UserRole(role), admin).value if role is not None else None,
+            role=visible_role(actor, admin).value if actor is not None else None,
             filename=fa.filename,
             area=fa.area,
             created_at=fa.created_at,
         )
-        for fa, role in db.execute(query).all()
+        for fa, actor in db.execute(query).all()
     ]
 
 

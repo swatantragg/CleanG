@@ -19,9 +19,11 @@ from .database import Base
 
 
 class UserRole(str, enum.Enum):
+    # API-only, NEVER stored: the accounts in config.SUPER_ADMIN_EMAILS are saved
+    # as `admin` and reported as super admin (see deps.effective_role). Older
+    # builds share this database and crash on a role value they don't know.
     # Everything an admin can do, plus resetting any password and running the
-    # daily-report mail. Held only by the accounts in config.SUPER_ADMIN_EMAILS;
-    # everyone else is shown this role as plain "admin".
+    # daily-report mail; everyone else sees these accounts as plain "admin".
     super_admin = "super_admin"
     admin = "admin"
     # Legacy: no longer assignable (only Admin / User are offered), but accounts

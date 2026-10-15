@@ -9,7 +9,7 @@ from ..core.audit import log_event
 from ..core.csrf import issue_csrf_token
 from ..core.limiter import limiter
 from ..database import get_db
-from ..deps import get_authenticated_user
+from ..deps import get_authenticated_user, user_out
 from ..models import User
 from ..schemas import ChangePassword, LoginRequest, UserOut
 from ..security import (
@@ -116,7 +116,7 @@ def login(
 
     token = create_access_token(str(user.id), user.token_version)
     _set_session_cookie(response, token)
-    return user
+    return user_out(user, user)
 
 
 @router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
@@ -135,7 +135,7 @@ def logout(
 
 @router.get("/me", response_model=UserOut)
 def me(current_user: User = Depends(get_authenticated_user)):
-    return current_user
+    return user_out(current_user, current_user)
 
 
 @router.post("/change-password", response_model=UserOut)
@@ -172,4 +172,4 @@ def change_password(
     # ...then mint a new session so the user stays logged in on this device.
     token = create_access_token(str(current_user.id), current_user.token_version)
     _set_session_cookie(response, token)
-    return current_user
+    return user_out(current_user, current_user)

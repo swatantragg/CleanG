@@ -2,9 +2,10 @@ from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.orm import Session
 
-from .config import get_settings
+from .config import get_settings, is_super_admin_email
 from .database import get_db
 from .models import User, UserRole
+from .schemas import UserOut
 from .security import decode_access_token
 
 settings = get_settings()
@@ -67,25 +68,35 @@ def get_current_user(user: User = Depends(get_authenticated_user)) -> User:
     return user
 
 
-# Roles with the admin app (user management, activity). A super admin is an
-# admin with a few extra powers, so every admin check accepts both.
-ADMIN_ROLES = (UserRole.admin, UserRole.super_admin)
+# Super admin is NOT a stored role: it is derived from config.SUPER_ADMIN_EMAILS,
+# and those accounts are stored as plain `admin`. The database is shared by every
+# running version of the app, and an older build crashes on any role value it
+# doesn't know — so `super_admin` must never be written to `users.role`.
+def is_super_admin(user: User) -> bool:
+    return is_super_admin_email(user.email)
 
 
 def is_admin(user: User) -> bool:
-    return user.role in ADMIN_ROLES
+    return user.role == UserRole.admin or is_super_admin(user)
 
 
-def is_super_admin(user: User) -> bool:
-    return user.role == UserRole.super_admin
+def effective_role(user: User) -> UserRole:
+    return UserRole.super_admin if is_super_admin(user) else user.role
 
 
-def visible_role(target_role: UserRole, viewer: User) -> UserRole:
+def visible_role(target: User, viewer: User) -> UserRole:
     """The role `viewer` is allowed to see for an account. Only a super admin
     sees the super admin role; to everyone else those accounts are admins."""
-    if target_role == UserRole.super_admin and not is_super_admin(viewer):
+    role = effective_role(target)
+    if role == UserRole.super_admin and not is_super_admin(viewer):
         return UserRole.admin
-    return target_role
+    return role
+
+
+def user_out(user: User, viewer: User) -> UserOut:
+    """Serialize `user` with the role `viewer` is allowed to see."""
+    out = UserOut.model_validate(user)
+    return out.model_copy(update={"role": visible_role(user, viewer)})
 
 
 def require_admin(current_user: User = Depends(get_current_user)) -> User:
@@ -106,13 +117,8 @@ def require_super_admin(current_user: User = Depends(get_current_user)) -> User:
     return current_user
 
 
-# Roles that see and work on EVERY branch, not just their own. Admins have the
-# full app (incl. user management); a legacy super user is scoped to branches
-# only — this is exactly the "any branch" privilege they share.
-BRANCH_ADMIN_ROLES = (UserRole.super_admin, UserRole.admin, UserRole.superuser)
-
-
 def can_access_all_branches(user: User) -> bool:
-    """True for admins and super users, who may view, edit and delete any branch;
-    a plain user is limited to the branches they own."""
-    return user.role in BRANCH_ADMIN_ROLES
+    """True for admins (super admins included) and legacy super users, who may
+    view, edit and delete any branch; a plain user is limited to the branches
+    they own."""
+    return is_admin(user) or user.role == UserRole.superuser
