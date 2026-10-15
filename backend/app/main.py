@@ -5,15 +5,16 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from openpyxl import load_workbook
 from slowapi.errors import RateLimitExceeded
-from sqlalchemy import select, text
+from sqlalchemy import func, or_, select, text
 from sqlalchemy.exc import DBAPIError, OperationalError, SQLAlchemyError
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.responses import JSONResponse, Response
 
-from .config import get_settings
+from .config import SUPER_ADMIN_EMAILS, get_settings, is_super_admin_email
 from .core.csrf import csrf_protect
 from .core.dynamic_columns import make_attr, quote_ident, sync_custom_columns
 from .core.limiter import limiter
+from .core.report_settings import seed_report_settings
 from .core.scheduler import shutdown_scheduler, start_scheduler
 from .database import Base, SessionLocal, engine
 from .models import MasterColumn, User, UserRole
@@ -66,9 +67,11 @@ def _migrate(db) -> None:
     # the type with all current values).
     if engine.dialect.name == "postgresql":
         with engine.connect() as conn:
-            conn.execution_options(isolation_level="AUTOCOMMIT").execute(
-                text("ALTER TYPE user_role ADD VALUE IF NOT EXISTS 'superuser'")
-            )
+            autocommit = conn.execution_options(isolation_level="AUTOCOMMIT")
+            for value in ("superuser", "super_admin"):
+                autocommit.execute(
+                    text(f"ALTER TYPE user_role ADD VALUE IF NOT EXISTS '{value}'")
+                )
     db.execute(text(
         "ALTER TABLE uploaded_files "
         "ADD COLUMN IF NOT EXISTS corrections JSONB NOT NULL DEFAULT '{}'::jsonb"
@@ -155,6 +158,25 @@ def _migrate_custom_columns(db) -> None:
     db.commit()
 
 
+def _sync_super_admins(db) -> None:
+    """Make the super admin role match config.SUPER_ADMIN_EMAILS exactly: listed
+    accounts are promoted, any other super admin is demoted to admin. Run on every
+    start, so there are never more than MAX_SUPER_ADMINS of them."""
+    candidates = db.scalars(
+        select(User).where(
+            or_(
+                User.role == UserRole.super_admin,
+                func.lower(User.email).in_(SUPER_ADMIN_EMAILS),
+            )
+        )
+    ).all()
+    for user in candidates:
+        want = UserRole.super_admin if is_super_admin_email(user.email) else UserRole.admin
+        if user.role != want:
+            user.role = want
+    db.commit()
+
+
 def init_db() -> None:
     """Create tables and seed the bootstrap admin + master schema if missing."""
     Base.metadata.create_all(bind=engine)
@@ -175,6 +197,8 @@ def init_db() -> None:
                 )
             )
             db.commit()
+        _sync_super_admins(db)
+        seed_report_settings(db)
         _seed_master_columns(db)
         # Attach every custom column to the ORM mapper so this process can
         # read/write them like built-ins from the first request.

@@ -7,17 +7,20 @@ import Branch from "./pages/Branch.jsx";
 import Standardize from "./pages/Standardize.jsx";
 import Export from "./pages/Export.jsx";
 import AdminUsers from "./pages/AdminUsers.jsx";
+import MailSettings from "./pages/MailSettings.jsx";
 import ChangePassword from "./pages/ChangePassword.jsx";
+import { isAdmin, isSuperAdmin } from "./utils/roles.js";
+import { APP_VERSION } from "./version.js";
 
-function RequireAuth({ children, adminOnly = false }) {
+function RequireAuth({ children, adminOnly = false, superAdminOnly = false }) {
   const { user, loading } = useAuth();
   if (loading) return <div className="center muted">Loading…</div>;
   if (!user) return <Navigate to="/login" replace />;
   // A pending forced password change blocks the whole app (the API returns 403
   // for everything else anyway) until the user sets a new password.
   if (user.must_change_password) return <ChangePassword forced />;
-  if (adminOnly && user.role !== "admin")
-    return <Navigate to="/" replace />;
+  if (adminOnly && !isAdmin(user)) return <Navigate to="/" replace />;
+  if (superAdminOnly && !isSuperAdmin(user)) return <Navigate to="/" replace />;
   return children;
 }
 
@@ -50,14 +53,21 @@ export default function App() {
             </RequireAuth>
           }
         />
+        <Route
+          path="/mail"
+          element={
+            <RequireAuth superAdminOnly>
+              <MailSettings />
+            </RequireAuth>
+          }
+        />
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
     {/* Real page footer: last thing in the document, so it scrolls with the page
         and only comes into view at the very bottom — never pinned over content. */}
     <footer className="app-footer">
-      <span className="version-badge">SKV2.7.2</span>
-      <span className="made-by">Developed By Rahul and SK</span>
+      <span className="version-badge">V{APP_VERSION}</span>
     </footer>
     </>
   );

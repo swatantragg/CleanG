@@ -3,6 +3,7 @@ import { Link } from "react-router-dom";
 import { api } from "../api/client.js";
 import { useAuth } from "../context/AuthContext.jsx";
 import Icon from "../components/Icon.jsx";
+import { canManageAllBranches as canManageAll } from "../utils/roles.js";
 
 const STEP_LABELS = ["Not started", "Uploaded", "Mapped", "Cleaned", "Saved"];
 
@@ -11,8 +12,7 @@ export default function Dashboard() {
   // Admins and super users see every branch and may delete any of them; a plain
   // user only ever sees their own and can't delete branches. (Backend enforces
   // this too — this just hides the control.)
-  const canManageAllBranches =
-    user?.role === "admin" || user?.role === "superuser";
+  const canManageAllBranches = canManageAll(user);
   const [branches, setBranches] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");

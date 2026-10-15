@@ -7,6 +7,7 @@ import UploadStep from "../components/UploadStep.jsx";
 import MappingStep from "../components/MappingStep.jsx";
 import CleanStep from "../components/CleanStep.jsx";
 import ReviewStep from "../components/ReviewStep.jsx";
+import { canManageAllBranches } from "../utils/roles.js";
 
 const STEPS = [
   { key: "upload", label: "Upload" },
@@ -131,7 +132,7 @@ export default function Branch() {
           <Link to="/">Branches</Link> <span>/</span>{" "}
           <strong>{branch ? branch.name : "…"}</strong>
         </div>
-        {(user?.role === "admin" || user?.role === "superuser") && branch && (
+        {canManageAllBranches(user) && branch && (
           <button className="btn sm danger" onClick={() => setShowDelete(true)}>
             <Icon name="trash" size={14} /> Delete branch
           </button>

@@ -1,8 +1,9 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import { useAuth } from "../context/AuthContext.jsx";
 import Icon from "./Icon.jsx";
-import { roleLabel } from "../utils/roles.js";
+import WhatsNew from "./WhatsNew.jsx";
+import { isAdmin, isSuperAdmin, roleLabel } from "../utils/roles.js";
 
 const THEME_KEY = "mrm_theme";
 
@@ -17,6 +18,85 @@ function initials(name = "") {
     .slice(0, 2)
     .join("")
     .toUpperCase();
+}
+
+function firstName(user) {
+  return (user?.full_name || "").trim().split(/\s+/)[0] || user?.email || "";
+}
+
+/** Avatar + first name; opens a small menu with role, theme and sign out. */
+function ProfileMenu({ user, theme, onToggleTheme, onLogout }) {
+  const [open, setOpen] = useState(false);
+  const boxRef = useRef(null);
+  const { pathname } = useLocation();
+
+  useEffect(() => setOpen(false), [pathname]);
+
+  useEffect(() => {
+    if (!open) return;
+    function onDown(e) {
+      if (!boxRef.current?.contains(e.target)) setOpen(false);
+    }
+    function onKey(e) {
+      if (e.key === "Escape") setOpen(false);
+    }
+    document.addEventListener("mousedown", onDown);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDown);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+
+  return (
+    <div className="user-box" ref={boxRef}>
+      <button
+        type="button"
+        className="profile-trigger"
+        onClick={() => setOpen((o) => !o)}
+        aria-haspopup="menu"
+        aria-expanded={open}
+      >
+        <span className="avatar">{initials(user?.full_name)}</span>
+        <span className="user-name">{firstName(user)}</span>
+        <Icon name="chevronDown" size={14} className="profile-caret" />
+      </button>
+      {open && (
+        <div className="profile-menu" role="menu">
+          <div className="profile-menu-head">
+            <strong>{user?.full_name}</strong>
+            <span className="muted small profile-email" title={user?.email}>
+              {user?.email}
+            </span>
+          </div>
+          <div className="profile-menu-row">
+            <span>Role</span>
+            <span className="role-pill">{roleLabel(user?.role)}</span>
+          </div>
+          <button
+            type="button"
+            role="menuitem"
+            className="profile-menu-row profile-menu-item"
+            onClick={onToggleTheme}
+          >
+            <span>Theme</span>
+            <span className="profile-theme">
+              <Icon name={theme === "dark" ? "moon" : "sun"} size={15} />
+              {theme === "dark" ? "Dark" : "Light"}
+            </span>
+          </button>
+          <button
+            type="button"
+            role="menuitem"
+            className="profile-menu-item profile-signout"
+            onClick={onLogout}
+          >
+            <Icon name="logout" size={15} /> Sign out
+          </button>
+        </div>
+      )}
+    </div>
+  );
 }
 
 export default function Layout() {
@@ -56,35 +136,28 @@ export default function Layout() {
           <NavLink to="/export">
             <Icon name="download" size={16} /> Export
           </NavLink>
-          {user?.role === "admin" && (
+          {isAdmin(user) && (
             <NavLink to="/users">
               <Icon name="users" size={16} /> Users
             </NavLink>
           )}
+          {isSuperAdmin(user) && (
+            <NavLink to="/mail">
+              <Icon name="mail" size={16} /> Mail
+            </NavLink>
+          )}
         </nav>
-        <div className="user-box">
-          <button
-            className="btn ghost sm theme-toggle"
-            onClick={() => setTheme((t) => (t === "dark" ? "light" : "dark"))}
-            title={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
-          >
-            <Icon name={theme === "dark" ? "sun" : "moon"} size={16} />
-          </button>
-          <div className="avatar">{initials(user?.full_name)}</div>
-          <div style={{ display: "flex", flexDirection: "column", lineHeight: 1.2 }}>
-            <span className="user-name">{user?.full_name}</span>
-            <span className="role-pill" style={{ alignSelf: "flex-start" }}>
-              {roleLabel(user?.role)}
-            </span>
-          </div>
-          <button className="btn ghost sm" onClick={handleLogout} title="Log out">
-            <Icon name="logout" size={16} />
-          </button>
-        </div>
+        <ProfileMenu
+          user={user}
+          theme={theme}
+          onToggleTheme={() => setTheme((t) => (t === "dark" ? "light" : "dark"))}
+          onLogout={handleLogout}
+        />
       </header>
       <main className={`content${wide ? " content-wide" : ""}`}>
         <Outlet />
       </main>
+      <WhatsNew key={user?.id} user={user} />
     </div>
   );
 }

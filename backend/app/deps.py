@@ -67,8 +67,29 @@ def get_current_user(user: User = Depends(get_authenticated_user)) -> User:
     return user
 
 
+# Roles with the admin app (user management, activity). A super admin is an
+# admin with a few extra powers, so every admin check accepts both.
+ADMIN_ROLES = (UserRole.admin, UserRole.super_admin)
+
+
+def is_admin(user: User) -> bool:
+    return user.role in ADMIN_ROLES
+
+
+def is_super_admin(user: User) -> bool:
+    return user.role == UserRole.super_admin
+
+
+def visible_role(target_role: UserRole, viewer: User) -> UserRole:
+    """The role `viewer` is allowed to see for an account. Only a super admin
+    sees the super admin role; to everyone else those accounts are admins."""
+    if target_role == UserRole.super_admin and not is_super_admin(viewer):
+        return UserRole.admin
+    return target_role
+
+
 def require_admin(current_user: User = Depends(get_current_user)) -> User:
-    if current_user.role != UserRole.admin:
+    if not is_admin(current_user):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Admin privileges required",
@@ -76,10 +97,19 @@ def require_admin(current_user: User = Depends(get_current_user)) -> User:
     return current_user
 
 
-# Roles that see and work on EVERY branch, not just their own. An admin has the
-# full app (incl. user management); a super user is scoped to branches only — this
-# helper is exactly the "any branch" privilege the two share.
-BRANCH_ADMIN_ROLES = (UserRole.admin, UserRole.superuser)
+def require_super_admin(current_user: User = Depends(get_current_user)) -> User:
+    if not is_super_admin(current_user):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Super admin privileges required",
+        )
+    return current_user
+
+
+# Roles that see and work on EVERY branch, not just their own. Admins have the
+# full app (incl. user management); a legacy super user is scoped to branches
+# only — this is exactly the "any branch" privilege they share.
+BRANCH_ADMIN_ROLES = (UserRole.super_admin, UserRole.admin, UserRole.superuser)
 
 
 def can_access_all_branches(user: User) -> bool:

@@ -19,9 +19,14 @@ from .database import Base
 
 
 class UserRole(str, enum.Enum):
+    # Everything an admin can do, plus resetting any password and running the
+    # daily-report mail. Held only by the accounts in config.SUPER_ADMIN_EMAILS;
+    # everyone else is shown this role as plain "admin".
+    super_admin = "super_admin"
     admin = "admin"
-    # Sees, edits and deletes EVERY branch like an admin, but has no access to
-    # user management (can't create/list users or view the activity/audit trail).
+    # Legacy: no longer assignable (only Admin / User are offered), but accounts
+    # that already hold it keep working. Sees, edits and deletes EVERY branch like
+    # an admin, with no access to user management.
     superuser = "superuser"
     user = "user"
 
@@ -354,6 +359,30 @@ class FileActivity(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), index=True
     )
+
+
+class ReportRecipient(Base):
+    """One address on the daily-report mailing list. A super admin switches each
+    on or off from the Mail tab; only `enabled` rows receive the report."""
+
+    __tablename__ = "report_recipients"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    email: Mapped[str] = mapped_column(String(255), unique=True)
+    enabled: Mapped[bool] = mapped_column(default=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
+class AppSetting(Base):
+    """Small key/value store for runtime switches (e.g. whether the daily report
+    runs), so they survive restarts without an environment change."""
+
+    __tablename__ = "app_settings"
+
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    value: Mapped[str] = mapped_column(String(255))
 
 
 class AuditEvent(Base):

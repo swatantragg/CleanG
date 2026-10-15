@@ -13,9 +13,26 @@ _PLACEHOLDER_SECRETS = {
     "12345678",
 }
 
+# --- Super admins (NOT environment-configurable) -----------------------------
+# The only accounts that hold the super admin role. Synced on every startup: an
+# account with one of these emails is promoted, any other super admin is demoted
+# to admin. Everyone else sees these accounts as plain admins.
+MAX_SUPER_ADMINS: int = 2
+SUPER_ADMIN_EMAILS: tuple[str, ...] = (
+    "swatantra.goongoonalo@gmail.com",
+    "rahuljadhav0417@gmail.com",
+)
+assert len(SUPER_ADMIN_EMAILS) <= MAX_SUPER_ADMINS, "at most 2 super admins"
+
+
+def is_super_admin_email(email: str | None) -> bool:
+    return (email or "").strip().lower() in SUPER_ADMIN_EMAILS
+
+
 # --- Daily report: hardcoded settings (NOT environment-configurable) --------
-# Only the SMTP connection details live in .env; everything about WHEN the
-# report runs and WHO receives it is fixed here.
+# Only the SMTP connection details live in .env; WHEN the report runs is fixed
+# here. WHO receives it (and whether it runs at all) is managed by a super admin
+# from the Mail tab and stored in the database — this list only seeds it once.
 REPORT_RECIPIENTS: list[str] = [
     "rahul.musicrightsmanagement@gmail.com",
     "swatantra.goongoonalo@gmail.com",
@@ -85,7 +102,8 @@ class Settings(BaseSettings):
 
     # --- SMTP for the daily report -----------------------------------------
     # Only the SMTP connection details come from the environment (.env); the
-    # report recipients + schedule are hardcoded below. The digest is sent only
+    # schedule is hardcoded above and the recipients live in the database. The
+    # digest is sent only
     # when SMTP is fully configured; otherwise the scheduler logs a warning and
     # skips (the app still boots normally).
     smtp_host: str = ""
@@ -101,13 +119,9 @@ class Settings(BaseSettings):
         return self.smtp_from or self.smtp_user
 
     @property
-    def report_recipient_list(self) -> list[str]:
-        return list(REPORT_RECIPIENTS)
-
-    @property
     def smtp_configured(self) -> bool:
         """True only when there is enough to actually send a mail."""
-        return bool(self.smtp_host and self.smtp_sender and REPORT_RECIPIENTS)
+        return bool(self.smtp_host and self.smtp_sender)
 
     @property
     def trusted_host_list(self) -> list[str]:

@@ -592,15 +592,24 @@ input::placeholder {
   font-size: 1.05rem;
   letter-spacing: -0.02em;
 }
+/* logo.png is cropped to the artwork (no built-in side padding), so the height
+   here is the visible logo height and it sits flush with the topbar gutter. */
 .brand-logo {
-  height: 60px;
+  height: 44px;
   width: auto;
   display: block;
+}
+/* The wordmark is dark grey — on dark surfaces give it a white chip so it stays
+   legible (the login aside chip below already has one). */
+:root[data-theme="dark"] .brand-logo:not(.brand-logo-chip) {
+  padding: 3px 8px;
+  background: #fff;
+  border-radius: var(--radius-sm);
 }
 /* Logo on a coloured surface (the login aside) — sits on a white chip so the
    green wordmark stays legible. */
 .brand-logo-chip {
-  height: 96px;
+  height: 72px;
   padding: 0.6rem 1.1rem;
   background: #fff;
   border-radius: var(--radius);
@@ -632,13 +641,110 @@ input::placeholder {
   font-weight: 600;
 }
 .user-box {
+  position: relative;
   display: flex;
   align-items: center;
-  gap: 0.7rem;
 }
 .user-name {
   font-size: 0.9rem;
-  font-weight: 500;
+  font-weight: 600;
+  max-width: 12ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Profile: avatar + first name; click opens role / theme / sign out. */
+.profile-trigger {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  padding: 0.3rem 0.55rem 0.3rem 0.3rem;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text);
+  font-family: inherit;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+.profile-trigger:hover,
+.profile-trigger[aria-expanded="true"] {
+  background: var(--surface-2);
+  border-color: var(--border);
+}
+.profile-caret {
+  color: var(--muted);
+  transition: transform 0.15s;
+}
+.profile-trigger[aria-expanded="true"] .profile-caret {
+  transform: rotate(180deg);
+}
+.profile-menu {
+  position: absolute;
+  top: calc(100% + 0.5rem);
+  right: 0;
+  z-index: 30;
+  width: 270px;
+  padding: 0.4rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-lg);
+  animation: pop 0.15s ease;
+}
+.profile-menu-head {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  padding: 0.55rem 0.65rem 0.7rem;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 0.3rem;
+}
+.profile-email {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.profile-menu-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.55rem 0.65rem;
+  font-size: 0.9rem;
+}
+.profile-menu-item {
+  width: 100%;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text);
+  font-family: inherit;
+  font-size: 0.9rem;
+  text-align: left;
+  cursor: pointer;
+}
+.profile-menu-item:hover {
+  background: var(--surface-2);
+}
+.profile-theme {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  color: var(--muted);
+  font-weight: 600;
+}
+.profile-signout {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 0.3rem;
+  padding: 0.55rem 0.65rem;
+  border-top: 1px solid var(--border);
+  border-radius: 0 0 var(--radius-sm) var(--radius-sm);
+  color: var(--red);
+  font-weight: 600;
 }
 .avatar {
   width: 32px;
@@ -2861,7 +2967,6 @@ input::placeholder {
   border-top: 1px solid var(--border);
 }
 
-.made-by,
 .version-badge {
   font-size: 0.72rem;
   color: var(--muted-2);
@@ -2869,13 +2974,183 @@ input::placeholder {
   border: 1px solid var(--border);
   border-radius: 999px;
   padding: 0.2rem 0.6rem;
-}
-.made-by {
-  font-weight: 600;
-}
-.version-badge {
   font-weight: 700;
   letter-spacing: 0.02em;
+}
+
+/* One-time "What's new" card for a release — bottom-right, non-blocking. */
+.whats-new {
+  position: fixed;
+  right: 1.25rem;
+  bottom: 1.25rem;
+  z-index: 50;
+  width: min(340px, calc(100vw - 2rem));
+  padding: 1rem 1.1rem 1.1rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-lg);
+  animation: rise 0.35s cubic-bezier(0.22, 1, 0.36, 1);
+}
+.whats-new-head {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+}
+.whats-new-head h3 {
+  flex: 1;
+  margin: 0;
+  font-size: 0.98rem;
+}
+.whats-new-spark {
+  display: inline-grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  color: #fff;
+  background: var(--brand-gradient);
+}
+.whats-new-close {
+  display: inline-grid;
+  place-items: center;
+  padding: 0.25rem;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+.whats-new-close:hover {
+  background: var(--surface-2);
+  color: var(--text);
+}
+.whats-new ul {
+  margin: 0.75rem 0 0.9rem;
+  padding-left: 1.1rem;
+  font-size: 0.86rem;
+  color: var(--text);
+}
+.whats-new li + li {
+  margin-top: 0.35rem;
+}
+
+/* ---------- Mail (super admin) ---------- */
+.mail-status {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+.mail-status h3 {
+  margin: 0 0 0.35rem;
+}
+.mail-status p {
+  margin: 0.15rem 0 0;
+}
+.create-form .mail-status .btn {
+  align-self: center;
+}
+.status-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-right: 0.4rem;
+  border-radius: 50%;
+  background: var(--muted-2);
+  vertical-align: middle;
+}
+.status-dot.on {
+  background: var(--green);
+  box-shadow: 0 0 0 3px var(--green-bg);
+}
+.mail-sent {
+  display: block;
+  margin-top: 0.5rem;
+}
+.mail-add {
+  display: flex;
+  gap: 0.6rem;
+}
+.mail-add input {
+  flex: 1;
+  min-width: 0;
+}
+.create-form .mail-add .btn {
+  align-self: stretch;
+}
+.row-off td:first-child {
+  color: var(--muted);
+}
+.switch {
+  position: relative;
+  width: 38px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  background: var(--surface-2);
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+.switch > span {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: var(--shadow-sm);
+  transition: transform 0.15s;
+}
+.switch.on {
+  background: var(--primary);
+  border-color: transparent;
+}
+.switch.on > span {
+  transform: translateX(16px);
+}
+.switch:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.switch:focus-visible {
+  outline: none;
+  box-shadow: var(--ring);
+}
+
+/* ---------- Users: row actions + set-password dialog ---------- */
+.row-actions {
+  text-align: right;
+  white-space: nowrap;
+}
+.row-actions .btn + .btn {
+  margin-left: 0.4rem;
+}
+.ok-note {
+  margin-bottom: 1rem;
+  padding: 0.7rem 0.9rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--green-bg);
+  color: var(--green);
+  font-size: 0.9rem;
+  font-weight: 500;
+}
+.pw-modal {
+  text-align: left;
+}
+.pw-modal .confirm-spark,
+.pw-modal h3 {
+  display: grid;
+  margin-left: auto;
+  margin-right: auto;
+  text-align: center;
+}
+.pw-modal input {
+  width: 100%;
 }
 
 /* ============================================================

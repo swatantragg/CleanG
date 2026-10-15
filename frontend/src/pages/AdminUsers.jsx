@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { api } from "../api/client.js";
 import { useAuth } from "../context/AuthContext.jsx";
 import Icon from "../components/Icon.jsx";
-import { ASSIGNABLE_ROLES, roleLabel } from "../utils/roles.js";
+import { ASSIGNABLE_ROLES, isSuperAdmin, roleLabel } from "../utils/roles.js";
 
 const EMPTY = { email: "", full_name: "", password: "", role: "user" };
 
@@ -117,6 +117,87 @@ function Activity({ users }) {
   );
 }
 
+/** Super-admin-only: set a new password for another account. */
+function SetPasswordDialog({ target, onClose, onDone }) {
+  const [password, setPassword] = useState("");
+  const [show, setShow] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  async function submit(e) {
+    e.preventDefault();
+    setError("");
+    setBusy(true);
+    try {
+      onDone(
+        await api(`/api/users/${target.id}/reset-password`, {
+          method: "POST",
+          body: { password },
+        })
+      );
+    } catch (err) {
+      setError(err.message);
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="save-overlay" onClick={busy ? undefined : onClose}>
+      <form
+        className="confirm-modal pw-modal"
+        onClick={(e) => e.stopPropagation()}
+        onSubmit={submit}
+      >
+        <div className="confirm-spark">
+          <Icon name="lock" size={22} />
+        </div>
+        <h3>Set a new password</h3>
+        <p className="muted small">
+          For <strong>{target.full_name}</strong> ({target.email}). They'll be
+          signed out everywhere and asked to choose their own password at next
+          login.
+        </p>
+        {error && <div className="alert">{error}</div>}
+        <label>
+          New password
+          <span className="pw-wrap">
+            <input
+              type={show ? "text" : "password"}
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              minLength={8}
+              required
+              autoFocus
+            />
+            <button
+              type="button"
+              className="pw-toggle"
+              onClick={() => setShow((s) => !s)}
+              aria-label={show ? "Hide password" : "Show password"}
+              title={show ? "Hide password" : "Show password"}
+              tabIndex={-1}
+            >
+              <Icon name={show ? "eyeOff" : "eye"} size={18} />
+            </button>
+          </span>
+          <small className="muted">
+            Min 8 characters, with an uppercase letter, a lowercase letter and a
+            digit.
+          </small>
+        </label>
+        <div className="confirm-actions">
+          <button type="button" className="btn sm" onClick={onClose} disabled={busy}>
+            Cancel
+          </button>
+          <button type="submit" className="btn sm primary" disabled={busy}>
+            {busy ? "Saving…" : "Set password"}
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
 export default function AdminUsers() {
   const { user: me } = useAuth();
   const [users, setUsers] = useState([]);
@@ -127,9 +208,11 @@ export default function AdminUsers() {
   const [showPw, setShowPw] = useState(false);
   const [tab, setTab] = useState("users");
   const [rowBusy, setRowBusy] = useState(null); // id of the user row being changed
-  const [reportBusy, setReportBusy] = useState(false);
-  const [reportMsg, setReportMsg] = useState("");
-  const [reportErr, setReportErr] = useState("");
+  // Row-action errors show right above the table, where the click happened.
+  const [rowError, setRowError] = useState("");
+  const [rowMsg, setRowMsg] = useState("");
+  const [pwTarget, setPwTarget] = useState(null); // user whose password is being set
+  const superAdmin = isSuperAdmin(me);
 
   async function load() {
     setLoading(true);
@@ -150,22 +233,6 @@ export default function AdminUsers() {
     setForm((f) => ({ ...f, [field]: value }));
   }
 
-  async function sendReportNow() {
-    setReportBusy(true);
-    setReportMsg("");
-    setReportErr("");
-    try {
-      const res = await api("/api/reports/daily/send", { method: "POST" });
-      setReportMsg(
-        `Report sent for ${res.files} file(s) to ${res.recipients.join(", ")}.`
-      );
-    } catch (err) {
-      setReportErr(err.message);
-    } finally {
-      setReportBusy(false);
-    }
-  }
-
   async function handleCreate(e) {
     e.preventDefault();
     setError("");
@@ -182,7 +249,8 @@ export default function AdminUsers() {
   }
 
   async function changeRole(id, role) {
-    setError("");
+    setRowError("");
+    setRowMsg("");
     setRowBusy(id);
     try {
       const updated = await api(`/api/users/${id}`, {
@@ -191,7 +259,7 @@ export default function AdminUsers() {
       });
       setUsers((prev) => prev.map((u) => (u.id === id ? updated : u)));
     } catch (err) {
-      setError(err.message);
+      setRowError(err.message);
     } finally {
       setRowBusy(null);
     }
@@ -204,16 +272,24 @@ export default function AdminUsers() {
       )
     )
       return;
-    setError("");
+    setRowError("");
+    setRowMsg("");
     setRowBusy(u.id);
     try {
       await api(`/api/users/${u.id}`, { method: "DELETE" });
       setUsers((prev) => prev.filter((x) => x.id !== u.id));
     } catch (err) {
-      setError(err.message);
+      setRowError(err.message);
     } finally {
       setRowBusy(null);
     }
+  }
+
+  function passwordSet(updated) {
+    setUsers((prev) => prev.map((u) => (u.id === updated.id ? updated : u)));
+    setRowError("");
+    setRowMsg(`New password set for ${updated.full_name}.`);
+    setPwTarget(null);
   }
 
   return (
@@ -246,25 +322,6 @@ export default function AdminUsers() {
       {tab === "users" && (
         <>
         {error && <div className="alert">{error}</div>}
-
-        <div className="card create-form">
-          <h3>Daily report email</h3>
-          <p className="muted">
-            A summary of every uploaded &amp; cleaned data file is emailed
-            automatically each day at 10:30 (India time). Use this to send it now
-            for testing.
-          </p>
-          <button
-            className="btn"
-            type="button"
-            onClick={sendReportNow}
-            disabled={reportBusy}
-          >
-            {reportBusy ? "Sending…" : "Send report now"}
-          </button>
-          {reportMsg && <small className="muted" style={{ display: "block", marginTop: 8 }}>{reportMsg}</small>}
-          {reportErr && <div className="alert" style={{ marginTop: 8 }}>{reportErr}</div>}
-        </div>
 
         <form className="card create-form" onSubmit={handleCreate}>
           <h3>Create account</h3>
@@ -333,6 +390,9 @@ export default function AdminUsers() {
           </button>
         </form>
 
+        {rowError && <div className="alert">{rowError}</div>}
+        {rowMsg && <div className="ok-note">{rowMsg}</div>}
+
         {loading ? (
           <p className="muted">Loading users…</p>
         ) : (
@@ -349,6 +409,12 @@ export default function AdminUsers() {
             <tbody>
               {users.map((u) => {
                 const isSelf = me?.id === u.id;
+                // Only a super admin ever receives "super_admin" here (the API
+                // shows those accounts to admins as plain admins).
+                const isSuper = u.role === "super_admin";
+                const roleOptions = ASSIGNABLE_ROLES.includes(u.role)
+                  ? ASSIGNABLE_ROLES
+                  : [u.role, ...ASSIGNABLE_ROLES];
                 return (
                   <tr key={u.id}>
                     <td>{u.full_name}</td>
@@ -356,30 +422,51 @@ export default function AdminUsers() {
                     <td>
                       <select
                         value={u.role}
-                        disabled={isSelf || rowBusy === u.id}
+                        disabled={isSelf || isSuper || rowBusy === u.id}
                         onChange={(e) => changeRole(u.id, e.target.value)}
                         title={
-                          isSelf ? "You can't change your own role" : "Change role"
+                          isSelf
+                            ? "You can't change your own role"
+                            : isSuper
+                              ? "Super admin role is fixed"
+                              : "Change role"
                         }
                       >
-                        {ASSIGNABLE_ROLES.map((r) => (
-                          <option key={r} value={r}>
+                        {roleOptions.map((r) => (
+                          <option
+                            key={r}
+                            value={r}
+                            disabled={!ASSIGNABLE_ROLES.includes(r)}
+                          >
                             {roleLabel(r)}
                           </option>
                         ))}
                       </select>
                     </td>
                     <td>{u.is_active ? "Active" : "Disabled"}</td>
-                    <td style={{ textAlign: "right" }}>
+                    <td className="row-actions">
+                      {superAdmin && !isSelf && !isSuper && (
+                        <button
+                          type="button"
+                          className="btn sm"
+                          disabled={rowBusy === u.id}
+                          onClick={() => setPwTarget(u)}
+                          title="Set a new password"
+                        >
+                          <Icon name="lock" size={15} /> Password
+                        </button>
+                      )}
                       <button
                         type="button"
                         className="btn danger sm"
-                        disabled={isSelf || rowBusy === u.id}
+                        disabled={isSelf || isSuper || rowBusy === u.id}
                         onClick={() => removeUser(u)}
                         title={
                           isSelf
                             ? "You can't delete your own account"
-                            : "Delete user"
+                            : isSuper
+                              ? "Super admin accounts can't be deleted"
+                              : "Delete user"
                         }
                       >
                         <Icon name="trash" size={15} /> Delete
@@ -392,6 +479,14 @@ export default function AdminUsers() {
           </table>
         )}
         </>
+      )}
+
+      {pwTarget && (
+        <SetPasswordDialog
+          target={pwTarget}
+          onClose={() => setPwTarget(null)}
+          onDone={passwordSet}
+        />
       )}
     </section>
   );

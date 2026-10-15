@@ -56,9 +56,9 @@ class FileActivityOut(BaseModel):
     user_id: int | None
     user_name: str
     user_email: str
-    # The actor's current role ("admin" / "superuser" / "user"), so the admin can
-    # tell at a glance that e.g. a super user worked on a branch. Null if the
-    # account was since deleted.
+    # The actor's current role as the viewer may see it ("admin" / "user", or
+    # "super_admin" for a super admin viewer). Null if the account was since
+    # deleted.
     role: str | None = None
     filename: str
     area: str
@@ -79,6 +79,17 @@ class AuditEventOut(BaseModel):
 
 
 # ---- Users ----
+# The only roles anyone can hand out. Super admin comes from a fixed email list
+# (config.SUPER_ADMIN_EMAILS) and the legacy super user role is retired.
+ASSIGNABLE_ROLES = (UserRole.user, UserRole.admin)
+
+
+def validate_assignable_role(value: UserRole | None) -> UserRole | None:
+    if value is not None and value not in ASSIGNABLE_ROLES:
+        raise ValueError("Role must be Admin or User.")
+    return value
+
+
 class UserCreate(BaseModel):
     email: EmailStr
     full_name: ShortText
@@ -86,6 +97,7 @@ class UserCreate(BaseModel):
     role: UserRole = UserRole.user
 
     _check_password = field_validator("password")(validate_password_strength)
+    _check_role = field_validator("role")(validate_assignable_role)
 
 
 class UserUpdate(BaseModel):
@@ -93,6 +105,8 @@ class UserUpdate(BaseModel):
 
     role: UserRole | None = None
     is_active: bool | None = None
+
+    _check_role = field_validator("role")(validate_assignable_role)
 
 
 class PasswordReset(BaseModel):
@@ -111,6 +125,37 @@ class UserOut(BaseModel):
     is_active: bool
     must_change_password: bool = False
     created_at: datetime
+
+
+# ---- Daily report mail (super admin) ----
+class ReportRecipientOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    email: str
+    enabled: bool
+
+
+class ReportRecipientCreate(BaseModel):
+    email: EmailStr
+
+
+class ReportRecipientUpdate(BaseModel):
+    enabled: bool
+
+
+class ReportSettingsOut(BaseModel):
+    enabled: bool  # whether the scheduled daily send runs
+    smtp_configured: bool
+    sender: str
+    schedule: str  # "HH:MM", in `timezone`
+    timezone: str
+    next_run: datetime | None  # None when the scheduler isn't running
+    recipients: list[ReportRecipientOut]
+
+
+class ReportSettingsUpdate(BaseModel):
+    enabled: bool
 
 
 # ---- Branches ----

@@ -18,18 +18,20 @@ def send_email(
     subject: str,
     html_body: str,
     text_body: str,
-    recipients: list[str] | None = None,
+    recipients: list[str],
 ) -> list[str]:
     """Send one email. Returns the recipient list actually used."""
     settings = get_settings()
     if not settings.smtp_configured:
         raise RuntimeError(
-            "SMTP is not configured. Set SMTP_HOST, SMTP_USER/SMTP_FROM and "
-            "REPORT_RECIPIENTS in the environment."
+            "SMTP is not configured. Set SMTP_HOST and SMTP_USER/SMTP_FROM in "
+            "the environment."
         )
-    to = recipients or settings.report_recipient_list
+    to = list(recipients)
     if not to:
-        raise RuntimeError("No report recipients configured.")
+        raise RuntimeError(
+            "No report recipients are switched on. Turn one on in the Mail tab."
+        )
 
     msg = EmailMessage()
     msg["Subject"] = subject
