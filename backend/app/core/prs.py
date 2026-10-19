@@ -34,6 +34,12 @@ Both carry identical work-level columns.
 Field transforms follow the mapping schema: "LASTNAME, FIRSTNAME" -> "Firstname
 Lastname", "052:PRS" -> "PRS", durations to HH:MM:SS, dates to DD-MM-YYYY.
 Every other field is passed through unchanged.
+
+IPRS "work listing" exports are accepted too: banner rows above the header are
+skipped, a two-row header ("PER SHARES" over "OWN % / COLLECT %") is merged,
+work fields printed only on a work's first row are carried down to its party
+rows, and summary rows ("NO. OF WORKS : 413") are dropped — after which the file
+goes through exactly the same consolidation as a PRS report.
 """
 
 import datetime as dt
@@ -44,13 +50,14 @@ from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
-from .standardize import StandardizeError, load_table
+from .standardize import StandardizeError, load_grid, split_header
 
 # --------------------------------------------------------------------------
 # Schema
 # --------------------------------------------------------------------------
 # Work identifier, in order of preference — the first one present is used.
-KEY_CANDIDATES = ["ALLIANCE_TUNECODE", "WORKKEY", "INPUT_KEY"]
+# INTERNAL_NO is the IPRS work number of an IPRS "work listing" export.
+KEY_CANDIDATES = ["ALLIANCE_TUNECODE", "WORKKEY", "INPUT_KEY", "INTERNAL_NO"]
 
 # Interested-party columns: source header -> output label.
 PARTY_FIELDS: dict[str, str] = {
@@ -74,6 +81,20 @@ CORE_FIELDS = ["NAME", "ROLE_CLASS", "IPI_NO", "PERF_SOCIETY", "PERF"]
 VARIANTS = {"full": FULL_FIELDS, "core": CORE_FIELDS}
 
 ROLE_COLUMN = "ROLE_CLASS"
+
+# Other societies' spelling of the same party fields (IPRS work listing:
+# ROLE / SOCIETY / "PER SHARES" + "OWN %" ...). Keyed by normalized header; an
+# alias only applies when the file doesn't also carry the canonical column.
+HEADER_ALIASES: dict[str, str] = {
+    "ROLE": "ROLE_CLASS",
+    "SOCIETY": "PERF_SOCIETY",
+    "PERSHARESOWN": "PERF",
+    "MECSHARESOWN": "MECH",
+}
+
+# How far down a report the header row is searched for (banner rows above it,
+# e.g. the IPRS listing's member name / IPI block, are skipped).
+HEADER_SCAN_ROWS = 30
 
 # Ownership: a work is always 100%, divided into these role pools. Each pool is
 # split equally between the parties that hold it in that work, so the numbers
@@ -296,33 +317,48 @@ def _norm_header(h: str) -> str:
     return re.sub(r"[^A-Z0-9]", "", str(h or "").upper())
 
 
-def analyze(headers: list[str], rows: list[list]) -> dict:
+_KNOWN_COLUMNS = list(PARTY_FIELDS) + sorted(
+    SOCIETY_COLUMNS | DATE_COLUMNS | DIST_REF_COLUMNS | DURATION_COLUMNS
+)
+
+
+def canonical_names(headers: list[str]) -> dict[str, str]:
+    """Canonical name per source header, so transforms/labels work whatever the
+    file's exact spelling is. An exact match wins over an alias, and each
+    canonical name is claimed by one header only."""
+    known = {_norm_header(c): c for c in _KNOWN_COLUMNS}
+    canon = {h: known.get(_norm_header(h), h) for h in headers}
+    taken = set(canon.values())
+    for h in headers:
+        target = HEADER_ALIASES.get(_norm_header(h))
+        if canon[h] == h and target and target not in taken:
+            canon[h] = target
+            taken.add(target)
+    return canon
+
+
+def find_key(headers: list[str]) -> str | None:
+    lookup = {_norm_header(h): h for h in headers}
+    return next((lookup[_norm_header(k)] for k in KEY_CANDIDATES if _norm_header(k) in lookup), None)
+
+
+def analyze(headers: list[str], rows: list[list], layout: list[str] | None = None) -> dict:
     """Read the report, apply the transforms and work out the layout.
 
     Returns everything both variants need: the transformed party records grouped
     by work, the work-level columns, and the per-role column budget.
     """
-    lookup = {_norm_header(h): h for h in headers}
-    key = next((lookup[_norm_header(k)] for k in KEY_CANDIDATES if _norm_header(k) in lookup), None)
+    key = find_key(headers)
     if key is None:
         raise PrsError(
             "No work identifier found. The report needs an ALLIANCE_TUNECODE, "
-            "WORKKEY or INPUT_KEY column."
+            "WORKKEY or INPUT_KEY column (or INTERNAL NO in an IPRS work listing)."
         )
-    if _norm_header(ROLE_COLUMN) not in lookup:
-        raise PrsError("No ROLE_CLASS column found — interested-party roles are required.")
+    canon = canonical_names(headers)
+    role_col = next((h for h in headers if canon[h] == ROLE_COLUMN), None)
+    if role_col is None:
+        raise PrsError("No ROLE_CLASS (or ROLE) column found — interested-party roles are required.")
 
-    # Canonical name per source header, so transforms/labels work whatever the
-    # file's exact spelling is.
-    canon = {}
-    for source in headers:
-        n = _norm_header(source)
-        match = next((c for c in list(PARTY_FIELDS) + list(SOCIETY_COLUMNS | DATE_COLUMNS
-                                                          | DIST_REF_COLUMNS | DURATION_COLUMNS)
-                      if _norm_header(c) == n), None)
-        canon[source] = match or source
-
-    role_col = lookup[_norm_header(ROLE_COLUMN)]
     party_cols = [h for h in headers if canon[h] in PARTY_FIELDS]
     work_cols = [h for h in headers if h not in party_cols]
     idx = {h: i for i, h in enumerate(headers)}
@@ -376,7 +412,7 @@ def analyze(headers: list[str], rows: list[list]) -> dict:
     # Ownership allocation, per work: the calculated share overwrites Performance
     # Share, and any pool with no holder is reported in the Issue column rather
     # than being shared out among the roles that are present.
-    share_col = lookup.get(_norm_header(SHARE_COLUMN))
+    share_col = next((h for h in headers if canon[h] == SHARE_COLUMN), None)
     issues: dict[str, str] = {}
     for work_key, parties in works.items():
         shares, missing = allocate_shares(parties, role_col)
@@ -400,6 +436,7 @@ def analyze(headers: list[str], rows: list[list]) -> dict:
         "duplicates": duplicates,
         "share_column": share_col,
         "issues": issues,
+        "layout": layout or [],
     }
 
 
@@ -483,6 +520,8 @@ def validate(info: dict, built: dict, variant: str) -> list[dict]:
     def add(check: str, ok: bool, detail: str = "") -> None:
         checks.append({"check": check, "ok": bool(ok), "detail": detail})
 
+    if info.get("layout"):
+        add("Work-listing layout recognised", True, "; ".join(info["layout"]))
     n_works = len(info["works"])
     keys = [r[key] for r in built["rows"]]
     add("Every unique work appears exactly once",
@@ -624,14 +663,166 @@ def to_workbook(info: dict, built: dict, checks: list[dict]) -> bytes:
     return buf.getvalue()
 
 
+# --------------------------------------------------------------------------
+# Locating the table (plain PRS report or IPRS-style work listing)
+# --------------------------------------------------------------------------
+def _is_header_row(cells: list[str]) -> bool:
+    """A row naming both a work identifier and a role column."""
+    names = [str(c).strip() for c in cells if str(c).strip()]
+    canon = canonical_names(names)
+    return find_key(names) is not None and ROLE_COLUMN in canon.values()
+
+
+def _merge_header(top: list[str], sub: list[str]) -> list[str]:
+    """Two-row header -> one: a sub-label is prefixed with the group label above
+    it (or to its left, for a group spanning several columns), so "PER SHARES"
+    over "OWN %" / "COLLECT %" becomes "PER SHARES OWN %" / "PER SHARES COLLECT %"."""
+    width = max(len(top), len(sub))
+    top = list(top) + [""] * (width - len(top))
+    sub = list(sub) + [""] * (width - len(sub))
+    merged, group = [], ""
+    for t, s in zip(top, sub):
+        t, s = t.strip(), s.strip()
+        if t:
+            group = t
+        merged.append(" ".join(f"{group} {s}".split()) if s and group else (t or s))
+    return merged
+
+
+def _unique_headers(headers: list[str]) -> list[str]:
+    out, seen = [], {}
+    for j, h in enumerate(headers):
+        h = " ".join(h.split()) or f"Column {get_column_letter(j + 1)}"
+        seen[h] = seen.get(h, 0) + 1
+        out.append(h if seen[h] == 1 else f"{h} ({seen[h]})")
+    return out
+
+
+def locate_table(grid: list[list[str]]) -> tuple[list[str], list[list], list[str]]:
+    """Find the header row and reshape the body into one record per party.
+
+    A plain PRS export (header on the first row, key on every row) takes the
+    usual path untouched. Anything else is read as a work listing:
+      - banner rows above the header are skipped,
+      - a sub-header row directly below it is merged in,
+      - work-level columns (blank on every continuation row in the whole file)
+        are carried down from a work's first row to its other party rows,
+      - rows with no party (summary lines such as "NO. OF WORKS : 413") dropped.
+    Returns (headers, rows, layout notes for the validation sheet).
+    """
+    def plain() -> tuple[list[str], list[list], list[str]]:
+        try:
+            headers, rows = split_header(grid)
+        except StandardizeError as exc:
+            raise PrsError(exc.message) from exc
+        return headers, rows, []
+
+    start = next((i for i, r in enumerate(grid[:HEADER_SCAN_ROWS]) if _is_header_row(r)), None)
+    if start is None:
+        return plain()
+
+    def cell(row: list[str], j: int | None) -> str:
+        return str(row[j]).strip() if j is not None and j < len(row) else ""
+
+    def locate(header: list[str]) -> tuple[int, int, int | None]:
+        canon = canonical_names(header)
+        name = next((j for j, h in enumerate(header) if canon[h] == "NAME"), None)
+        role = next(j for j, h in enumerate(header) if canon[h] == ROLE_COLUMN)
+        return header.index(find_key(header)), role, name
+
+    header = [str(c) for c in grid[start]]
+    body = grid[start + 1:]
+    key_j, role_j, name_j = locate(header)
+
+    # Sub-header: no key / role / name, no numbers, and at least one label sitting
+    # under a blank top cell (the tail of a spanning group such as "PER SHARES").
+    sub = [str(c).strip() for c in body[0]] if body else []
+    two_row = bool(sub) and not any(cell(sub, j) for j in (key_j, role_j, name_j)) and not any(
+        _INT.fullmatch(v) or _FLOAT.fullmatch(v) for v in sub if v
+    ) and any(v and not cell(header, j) for j, v in enumerate(sub))
+    blocks = any(not cell(r, key_j) and (cell(r, role_j) or cell(r, name_j))
+                 for r in body[1 if two_row else 0:])
+    if start == 0 and not two_row and not blocks:
+        return plain()
+
+    notes: list[str] = []
+    if start:
+        notes.append(f"{start} banner row{'s' if start != 1 else ''} above the header skipped")
+    if two_row:
+        header, body = _merge_header(header, sub), body[1:]
+        notes.append("two-row header merged")
+
+    width = max([len(header)] + [len(r) for r in body])
+    header = header + [""] * (width - len(header))
+    body = [list(r) + [""] * (width - len(r)) for r in body]
+    # Columns with neither a header nor any data are dropped; a data column with
+    # no header gets a positional name.
+    keep = [j for j in range(width) if header[j].strip() or any(str(r[j]).strip() for r in body)]
+    headers = _unique_headers([header[j] for j in keep])
+    body = [[r[j] for j in keep] for r in body]
+    if not blocks:
+        return headers, body, notes
+
+    key_j, role_j, name_j = locate(headers)
+
+    # Wrapped text: the export spills a long value onto an extra row holding only
+    # the overflow ("ZEE ENTERTAINMENT" / "ENTERPRISES LIMITED"). Such a row has no
+    # key, no role and no numbers — rejoin it to the row above, cell by cell.
+    joined, wrapped = [], 0
+    for r in body:
+        texts = [str(v).strip() for v in r]
+        if joined and not cell(r, key_j) and not cell(r, role_j) and not any(
+            _INT.fullmatch(v) or _FLOAT.fullmatch(v) for v in texts if v
+        ):
+            prev = joined[-1]
+            for j, v in enumerate(texts):
+                if v:
+                    prev[j] = f"{str(prev[j]).rstrip()} {v}" if str(prev[j]).strip() else v
+            wrapped += 1
+            continue
+        joined.append(list(r))
+    body = joined
+    if wrapped:
+        notes.append(f"{wrapped} wrapped-text row{'s' if wrapped != 1 else ''} rejoined to the row above")
+
+    def has_party(row: list[str]) -> bool:
+        return bool(cell(row, role_j) or cell(row, name_j))
+
+    continuation = [r for r in body if not cell(r, key_j) and has_party(r)]
+    canon = canonical_names(headers)
+    carried = [j for j, h in enumerate(headers)
+               if canon[h] not in PARTY_FIELDS and not any(cell(r, j) for r in continuation)]
+    rows, current, filled, dropped = [], None, 0, 0
+    for r in body:
+        if cell(r, key_j):
+            current = r
+        elif current is not None and has_party(r):
+            r = list(r)
+            for j in carried:
+                r[j] = current[j]
+            filled += 1
+        if not (has_party(r) and cell(r, key_j)):
+            dropped += 1                     # summary / orphan line, not a party
+            continue
+        rows.append(r)
+    notes.append(f"work fields carried down to {filled} party rows "
+                 f"({', '.join(headers[j] for j in carried)})")
+    if dropped:
+        notes.append(f"{dropped} row{'s' if dropped != 1 else ''} without an interested party skipped")
+    return headers, rows, notes
+
+
 def prepare(filename: str, data: bytes) -> dict:
     """Parse + transform an upload and work out its layout (one pass, reusable
     by both variants)."""
     try:
-        headers, rows = load_table(filename, data)
+        grid = load_grid(filename, data)
     except StandardizeError as exc:
         raise PrsError(exc.message) from exc
-    return analyze(headers, rows)
+    headers, rows, layout = locate_table(grid)
+    if not rows:
+        raise PrsError("The file has headers but no data rows.")
+    return analyze(headers, rows, layout)
 
 
 def consolidate(info: dict, variant: str) -> dict:

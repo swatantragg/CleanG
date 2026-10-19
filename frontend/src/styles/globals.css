@@ -2952,22 +2952,37 @@ input::placeholder {
 }
 .section-locked .sec-title { display: flex; align-items: center; gap: 0.25rem; }
 
-/* Page footer — version stamp + credit, side by side.
-   In normal document flow at the very end of the page (NOT pinned to the
-   viewport), so it stays out of the way and only comes into view once the user
-   has scrolled all the way down. */
+/* Page footer — version stamp, bottom-right.
+   #root is a full-height column and the page above it grows to fill it, so the
+   footer always sits at the bottom of the window on a short page and right after
+   the content on a long one. In flow (not pinned), so it never covers content. */
+#root {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+  min-height: 100dvh;
+}
+#root > :not(.app-footer) {
+  flex: 1 0 auto;
+}
+/* Full-screen pages share the column with the footer instead of pushing it
+   below the fold. */
+#root > .auth-shell,
+#root > .center {
+  min-height: 0;
+}
 .app-footer {
+  flex: none;
   display: flex;
   align-items: center;
-  justify-content: flex-end;  /* bottom-RIGHT of the page, in flow */
-  flex-wrap: wrap;
+  justify-content: flex-end;  /* bottom-RIGHT of the page */
   gap: 0.5rem;
-  margin-top: 2rem;
-  padding: 1.1rem 1.5rem 1.4rem;
+  padding: 0.85rem 1.5rem 1rem;
   border-top: 1px solid var(--border);
 }
 
 .version-badge {
+  font: inherit;
   font-size: 0.72rem;
   color: var(--muted-2);
   background: var(--surface-glass);
@@ -2976,13 +2991,21 @@ input::placeholder {
   padding: 0.2rem 0.6rem;
   font-weight: 700;
   letter-spacing: 0.02em;
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s;
+}
+.version-badge:hover,
+.version-badge[aria-expanded="true"] {
+  color: var(--text);
+  border-color: var(--brand);
 }
 
-/* One-time "What's new" card for a release — bottom-right, non-blocking. */
+/* "What's new" card for a release — bottom-right, non-blocking; raised clear of
+   the footer so the version badge stays clickable to toggle it. */
 .whats-new {
   position: fixed;
   right: 1.25rem;
-  bottom: 1.25rem;
+  bottom: 3.75rem;
   z-index: 50;
   width: min(340px, calc(100vw - 2rem));
   padding: 1rem 1.1rem 1.1rem;
@@ -3027,12 +3050,34 @@ input::placeholder {
 }
 .whats-new ul {
   margin: 0.75rem 0 0.9rem;
-  padding-left: 1.1rem;
+  padding: 0;
+  list-style: none;
   font-size: 0.86rem;
   color: var(--text);
 }
+.whats-new li {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+}
 .whats-new li + li {
-  margin-top: 0.35rem;
+  margin-top: 0.45rem;
+}
+.whats-new-tag {
+  flex: none;
+  min-width: 4.6rem;
+  text-align: center;
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  padding: 0.05rem 0.45rem;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--muted);
+}
+.whats-new-tag.tag-new {
+  color: var(--brand);
+  border-color: var(--brand);
 }
 
 /* ---------- Mail (super admin) ---------- */

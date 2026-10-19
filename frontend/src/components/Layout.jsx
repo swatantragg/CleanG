@@ -2,7 +2,6 @@ import { useEffect, useRef, useState } from "react";
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import { useAuth } from "../context/AuthContext.jsx";
 import Icon from "./Icon.jsx";
-import WhatsNew from "./WhatsNew.jsx";
 import { isAdmin, isSuperAdmin, roleLabel } from "../utils/roles.js";
 
 const THEME_KEY = "mrm_theme";
@@ -157,7 +156,6 @@ export default function Layout() {
       <main className={`content${wide ? " content-wide" : ""}`}>
         <Outlet />
       </main>
-      <WhatsNew key={user?.id} user={user} />
     </div>
   );
 }

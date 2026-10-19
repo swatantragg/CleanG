@@ -10,7 +10,7 @@ import AdminUsers from "./pages/AdminUsers.jsx";
 import MailSettings from "./pages/MailSettings.jsx";
 import ChangePassword from "./pages/ChangePassword.jsx";
 import { isAdmin, isSuperAdmin } from "./utils/roles.js";
-import { APP_VERSION } from "./version.js";
+import AppFooter from "./components/WhatsNew.jsx";
 
 function RequireAuth({ children, adminOnly = false, superAdminOnly = false }) {
   const { user, loading } = useAuth();
@@ -64,11 +64,10 @@ export default function App() {
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
-    {/* Real page footer: last thing in the document, so it scrolls with the page
-        and only comes into view at the very bottom — never pinned over content. */}
-    <footer className="app-footer">
-      <span className="version-badge">V{APP_VERSION}</span>
-    </footer>
+    {/* Page footer: last thing in the document. #root is a full-height column, so
+        on a short page it still sits at the bottom-right of the window, and on a
+        long one it follows the content — never floating mid-page or over it. */}
+    <AppFooter user={user} />
     </>
   );
 }

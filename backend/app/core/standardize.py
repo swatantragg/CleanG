@@ -264,7 +264,7 @@ def _cell_to_str(v) -> str:
     return str(v)
 
 
-def _load_xlsx(data: bytes) -> tuple[list[str], list[list]]:
+def _grid_xlsx(data: bytes) -> list[list[str]]:
     try:
         wb = load_workbook(io.BytesIO(data), read_only=True, data_only=True)
     except Exception as exc:  # openpyxl raises various errors on bad files
@@ -274,56 +274,58 @@ def _load_xlsx(data: bytes) -> tuple[list[str], list[list]]:
     ws = wb.active
     if ws is None:
         raise StandardizeError("The workbook has no sheets.")
+    # Read-only mode trusts the sheet's stored <dimension>, and some exporters
+    # write a bogus one (e.g. "A1" on a 2,000-row IPRS work listing), which would
+    # silently cut the sheet down to a single cell. Re-scan the real extent.
+    ws.reset_dimensions()
 
-    header: list[str] | None = None
-    rows: list[list] = []
+    grid: list[list[str]] = []
     for raw in ws.iter_rows(values_only=True):
         if not any(v not in (None, "") for v in raw):
             continue
-        if header is None:
-            header = [str(v).strip() if v is not None else "" for v in raw]
-            while header and header[-1] == "":
-                header.pop()
-            continue
-        n = len(header)
-        cells = list(raw[:n]) + [None] * (n - len(raw[:n]))
-        rows.append([_cell_to_str(v) for v in cells])
+        grid.append([_cell_to_str(v) for v in raw])
     wb.close()
-    if not header:
-        raise StandardizeError("No column headers were found.")
-    return header, rows
+    return grid
 
 
-def _load_csv(data: bytes) -> tuple[list[str], list[list]]:
+def _grid_csv(data: bytes) -> list[list[str]]:
     text = data.decode("utf-8-sig", errors="replace")
-    reader = csv.reader(io.StringIO(text))
-    header: list[str] | None = None
-    rows: list[list] = []
-    for raw in reader:
-        if not any((c or "").strip() for c in raw):
-            continue
-        if header is None:
-            header = [c.strip() for c in raw]
-            while header and header[-1] == "":
-                header.pop()
-            continue
-        n = len(header)
-        cells = list(raw[:n]) + [""] * (n - len(raw[:n]))
-        rows.append([c if c is not None else "" for c in cells])
+    return [
+        [c if c is not None else "" for c in raw]
+        for raw in csv.reader(io.StringIO(text))
+        if any((c or "").strip() for c in raw)
+    ]
+
+
+def load_grid(filename: str, data: bytes) -> list[list[str]]:
+    """Every non-blank row of an uploaded .csv / .xlsx / .xlsm, as strings, with
+    no assumption about where the header is (rows may differ in length)."""
+    name = (filename or "").lower()
+    if name.endswith(".csv"):
+        return _grid_csv(data)
+    if name.endswith((".xlsx", ".xlsm")):
+        return _grid_xlsx(data)
+    raise StandardizeError("Only .csv, .xlsx and .xlsm files are supported.")
+
+
+def split_header(grid: list[list[str]]) -> tuple[list[str], list[list]]:
+    """First row = headers (trailing blanks trimmed); every later row is padded or
+    cut to the header width."""
+    if not grid:
+        raise StandardizeError("No column headers were found.")
+    header = [str(v).strip() for v in grid[0]]
+    while header and header[-1] == "":
+        header.pop()
     if not header:
         raise StandardizeError("No column headers were found.")
+    n = len(header)
+    rows = [list(r[:n]) + [""] * (n - len(r[:n])) for r in grid[1:]]
     return header, rows
 
 
 def load_table(filename: str, data: bytes) -> tuple[list[str], list[list]]:
     """Parse an uploaded .csv / .xlsx / .xlsm into (headers, string rows)."""
-    name = (filename or "").lower()
-    if name.endswith(".csv"):
-        headers, rows = _load_csv(data)
-    elif name.endswith((".xlsx", ".xlsm")):
-        headers, rows = _load_xlsx(data)
-    else:
-        raise StandardizeError("Only .csv, .xlsx and .xlsm files are supported.")
+    headers, rows = split_header(load_grid(filename, data))
     if not rows:
         raise StandardizeError("The file has headers but no data rows.")
     return headers, rows
