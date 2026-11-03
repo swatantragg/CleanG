@@ -112,9 +112,10 @@ export default function PrsStandardize() {
         contain a “C” (CA, AC, CP…) go under Composer only, keeping their own role
         value. Names are flipped to “First Last”, society codes lose the numeric
         prefix, dates become DD-MM-YYYY — everything else is passed through as given.
-        An IPRS <em>work listing</em> works too: the member banner on top is
-        skipped, the two-row share header is merged, and the work details printed
-        only on a work’s first line are carried down to all of its parties.
+        An IPRS <em>work listing</em> or <em>member work detail</em> works too: the
+        member banner on top is skipped, the two-row share header is merged, and the
+        work details printed only on a work’s first line are carried down to all of
+        its parties.
       </p>
       <p className="muted" style={{ marginTop: 0 }}>
         Ownership is allocated for you: each work is 100% — <strong>25% composer,
@@ -180,7 +181,7 @@ export default function PrsStandardize() {
               <p className="dz-title">Drop a PRS report or IPRS work listing here, or click to browse</p>
               <p className="muted small">
                 .csv / .xlsx / .xlsm · up to 20&nbsp;MB · needs a work key
-                (ALLIANCE_TUNECODE, WORKKEY or INTERNAL NO) and a role column
+                (ALLIANCE_TUNECODE, WORKKEY, INTERNAL NO or WORK INT NO) and a role column
                 (ROLE_CLASS or ROLE)
               </p>
             </>

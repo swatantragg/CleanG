@@ -35,11 +35,12 @@ Field transforms follow the mapping schema: "LASTNAME, FIRSTNAME" -> "Firstname
 Lastname", "052:PRS" -> "PRS", durations to HH:MM:SS, dates to DD-MM-YYYY.
 Every other field is passed through unchanged.
 
-IPRS "work listing" exports are accepted too: banner rows above the header are
-skipped, a two-row header ("PER SHARES" over "OWN % / COLLECT %") is merged,
-work fields printed only on a work's first row are carried down to its party
-rows, and summary rows ("NO. OF WORKS : 413") are dropped — after which the file
-goes through exactly the same consolidation as a PRS report.
+IPRS "work listing" and "member work detail" exports are accepted too (the
+latter keys works by WORK INT NO and names the IPI column NAME NO): banner rows
+above the header are skipped, a two-row header ("PER SHARES" over "OWN % /
+COLLECT %") is merged, work fields printed only on a work's first row are carried
+down to its party rows, and summary rows ("NO. OF WORKS : 413") are dropped —
+after which the file goes through exactly the same consolidation as a PRS report.
 """
 
 import datetime as dt
@@ -56,8 +57,9 @@ from .standardize import StandardizeError, load_grid, split_header
 # Schema
 # --------------------------------------------------------------------------
 # Work identifier, in order of preference — the first one present is used.
-# INTERNAL_NO is the IPRS work number of an IPRS "work listing" export.
-KEY_CANDIDATES = ["ALLIANCE_TUNECODE", "WORKKEY", "INPUT_KEY", "INTERNAL_NO"]
+# INTERNAL_NO is the IPRS work number of an IPRS "work listing" export; the IPRS
+# "member work detail" export calls the same number WORK INT NO.
+KEY_CANDIDATES = ["ALLIANCE_TUNECODE", "WORKKEY", "INPUT_KEY", "INTERNAL_NO", "WORK_INT_NO"]
 
 # Interested-party columns: source header -> output label.
 PARTY_FIELDS: dict[str, str] = {
@@ -83,13 +85,16 @@ VARIANTS = {"full": FULL_FIELDS, "core": CORE_FIELDS}
 ROLE_COLUMN = "ROLE_CLASS"
 
 # Other societies' spelling of the same party fields (IPRS work listing:
-# ROLE / SOCIETY / "PER SHARES" + "OWN %" ...). Keyed by normalized header; an
+# ROLE / SOCIETY / "PER SHARES" + "OWN %" ...; IPRS member work detail: NAME NO
+# for the IPI, "MECH SHARES" for "MEC SHARES"). Keyed by normalized header; an
 # alias only applies when the file doesn't also carry the canonical column.
 HEADER_ALIASES: dict[str, str] = {
     "ROLE": "ROLE_CLASS",
     "SOCIETY": "PERF_SOCIETY",
+    "NAMENO": "IPI_NO",
     "PERSHARESOWN": "PERF",
     "MECSHARESOWN": "MECH",
+    "MECHSHARESOWN": "MECH",
 }
 
 # How far down a report the header row is searched for (banner rows above it,
@@ -135,19 +140,21 @@ class PrsError(Exception):
 # --------------------------------------------------------------------------
 # Field-level transforms
 # --------------------------------------------------------------------------
-def fix_name(value: str) -> str:
+def fix_name(value: str, last_first: bool = True) -> str:
     """"GULATI, UTTAM SINGH" -> "Uttam Singh Gulati".
 
+    With last_first=False the name is already "FIRST, LAST" (some IPRS exports):
+    "AMIT, BISWAS" -> "Amit Biswas", order kept and only the comma dropped.
     Names without a comma (companies, mononyms) are passed through untouched.
     """
     s = (value or "").strip()
     if "," not in s:
         return s
-    last, first = s.split(",", 1)
-    last, first = last.strip(), first.strip()
-    if not first or not last:
-        return (first or last).title()
-    return f"{first} {last}".title()
+    head, tail = s.split(",", 1)
+    head, tail = head.strip(), tail.strip()
+    if not head or not tail:
+        return (head or tail).title()
+    return (f"{tail} {head}" if last_first else f"{head} {tail}").title()
 
 
 def fix_society(value: str) -> str:
@@ -209,7 +216,7 @@ def fix_duration(value: str) -> str:
     return s
 
 
-def transform_cell(column: str, value) -> str:
+def transform_cell(column: str, value, last_first: bool = True) -> str:
     """Apply the schema transform for one column.
 
     Columns the schema marks "Same as Given" pass through byte for byte — not
@@ -217,7 +224,7 @@ def transform_cell(column: str, value) -> str:
     """
     s = "" if value is None else str(value)
     if column in NAME_COLUMNS:
-        return fix_name(s)
+        return fix_name(s, last_first)
     if column in SOCIETY_COLUMNS:
         return fix_society(s)
     if column in DATE_COLUMNS:
@@ -342,17 +349,19 @@ def find_key(headers: list[str]) -> str | None:
     return next((lookup[_norm_header(k)] for k in KEY_CANDIDATES if _norm_header(k) in lookup), None)
 
 
-def analyze(headers: list[str], rows: list[list], layout: list[str] | None = None) -> dict:
+def analyze(headers: list[str], rows: list[list], layout: list[str] | None = None,
+            last_first: bool = True) -> dict:
     """Read the report, apply the transforms and work out the layout.
 
     Returns everything both variants need: the transformed party records grouped
     by work, the work-level columns, and the per-role column budget.
+    `last_first` is the comma-name order (see `names_last_first`).
     """
     key = find_key(headers)
     if key is None:
         raise PrsError(
             "No work identifier found. The report needs an ALLIANCE_TUNECODE, "
-            "WORKKEY or INPUT_KEY column (or INTERNAL NO in an IPRS work listing)."
+            "WORKKEY or INPUT_KEY column (or INTERNAL NO / WORK INT NO in an IPRS export)."
         )
     canon = canonical_names(headers)
     role_col = next((h for h in headers if canon[h] == ROLE_COLUMN), None)
@@ -367,7 +376,8 @@ def analyze(headers: list[str], rows: list[list], layout: list[str] | None = Non
     records, seen = [], set()
     duplicates = 0
     for row in rows:
-        rec = {h: transform_cell(canon[h], row[idx[h]] if idx[h] < len(row) else "") for h in headers}
+        rec = {h: transform_cell(canon[h], row[idx[h]] if idx[h] < len(row) else "", last_first)
+               for h in headers}
         rec[key] = rec[key].strip()       # the grouping key is matched trimmed
         if not rec[key]:
             continue                      # a row with no work identifier isn't a work record
@@ -437,6 +447,7 @@ def analyze(headers: list[str], rows: list[list], layout: list[str] | None = Non
         "share_column": share_col,
         "issues": issues,
         "layout": layout or [],
+        "last_first": last_first,
     }
 
 
@@ -540,8 +551,12 @@ def validate(info: dict, built: dict, variant: str) -> list[dict]:
         f"{len(work_cols)} work columns, each verified constant within its work")
     add("Exact duplicate records removed", True,
         f"{info['duplicates']} dropped" if info["duplicates"] else "none found")
-    add("Names rearranged (LAST, FIRST -> First Last)", True,
-        "comma-less company names left untouched")
+    if info.get("last_first", True):
+        add("Names rearranged (LAST, FIRST -> First Last)", True,
+            "comma-less company names left untouched")
+    else:
+        add("Names kept in FIRST, LAST order (comma dropped)", True,
+            "order confirmed against the member name in the banner")
     add("Society codes stripped of their numeric prefix", True, "052:PRS -> PRS")
     add("Party fields included", True,
         ", ".join(field_label(info, f) for f in fields))
@@ -812,6 +827,43 @@ def locate_table(grid: list[list[str]]) -> tuple[list[str], list[list], list[str
     return headers, rows, notes
 
 
+def member_name(grid: list[list[str]]) -> str:
+    """The member's own name from an IPRS banner ("NAME | AMIT BISWAS") above
+    the header row, or "" when the file has no banner."""
+    for r in grid[:HEADER_SCAN_ROWS]:
+        if _is_header_row(r):
+            break
+        cells = [str(c).strip() for c in r]
+        for j, c in enumerate(cells):
+            if _norm_header(c) == "NAME":
+                return next((v for v in cells[j + 1:] if v), "")
+    return ""
+
+
+def names_last_first(grid: list[list[str]], headers: list[str], rows: list[list]) -> bool:
+    """Whether comma names read "LAST, FIRST" (the default) or "FIRST, LAST".
+
+    Decided from the data: the member named in the banner ("AMIT BISWAS") also
+    appears as a party, and the order of that party's comma name ("AMIT, BISWAS"
+    vs "BISWAS, AMIT") tells which convention the whole export uses.
+    """
+    member = member_name(grid).upper().split()
+    canon = canonical_names(headers)
+    j = next((i for i, h in enumerate(headers) if canon[h] == "NAME"), None)
+    if not member or j is None:
+        return True
+    for r in rows:
+        s = str(r[j]).upper() if j < len(r) else ""
+        if "," not in s:
+            continue
+        head, tail = (part.split() for part in s.split(",", 1))
+        if head and tail and head + tail == member:
+            return False
+        if head and tail and tail + head == member:
+            return True
+    return True
+
+
 def prepare(filename: str, data: bytes) -> dict:
     """Parse + transform an upload and work out its layout (one pass, reusable
     by both variants)."""
@@ -822,7 +874,10 @@ def prepare(filename: str, data: bytes) -> dict:
     headers, rows, layout = locate_table(grid)
     if not rows:
         raise PrsError("The file has headers but no data rows.")
-    return analyze(headers, rows, layout)
+    last_first = names_last_first(grid, headers, rows)
+    if not last_first:
+        layout.append("names already FIRST, LAST (matched to the member banner) — order kept")
+    return analyze(headers, rows, layout, last_first)
 
 
 def consolidate(info: dict, variant: str) -> dict:
