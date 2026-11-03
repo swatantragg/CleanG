@@ -13,7 +13,7 @@ pandas==3.0.5
 # Pulled in by pandas, but imported directly by the review router: the 90/80/70
 # near-match badges prune candidate pairs with a vectorised character-multiset
 # bound before the (much slower) difflib scoring.
-numpy==2.5.1
+numpy==2.5.4
 slowapi==0.1.10
 # Optional Redis backend for the shared rate limiter (set REDIS_URL to enable).
 redis==8.1.0
